@@ -228,7 +228,8 @@ def deep_eval(con, jobs, cfg) -> list[dict]:
                    "risk": (d.get("risk") or "")[:100]}
             out.append(rec)
             dbm.record(con, j.key, "deep_eval", score,
-                       {"dims": rec["dims"], "verdict": rec["verdict"]})
+                       {"dims": rec["dims"], "verdict": rec["verdict"],
+                        "blurb": rec["blurb"], "risk": rec["risk"]})
             con.execute("UPDATE opportunities SET best_score=MAX(best_score,?) WHERE key=?",
                         (score, j.key))
     return out
@@ -242,6 +243,7 @@ def confidence_adjust(con, rec, now_ts: float) -> float:
     if row:
         anchor = row["last_signal"] or row["posted_at"] or now_ts
         age_d = max(0.0, (now_ts - anchor) / 86400.0)
+        age_d = max(0.0, age_d - 2.0)  # 48h grace before any decay
         half = SIGNAL_HALF_LIFE_D if "signal" in rec["job"].source else POSTING_HALF_LIFE_D
         score *= 0.5 ** (age_d / half) if age_d > half else 1.0 - 0.35 * (age_d / half)
         n_sig = dbm.distinct_signal_count(row["signal_log"])

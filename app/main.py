@@ -21,7 +21,7 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message
 LOG = logging.getLogger("main")
 try:
     NY = ZoneInfo("America/New_York")
-except Exception:
+except Exception:  # tz database missing on minimal images — approximate ET
     import datetime as _dt
     NY = _dt.timezone(_dt.timedelta(hours=-5), "ET")
 SCAN_EVERY_H = 3
@@ -37,6 +37,13 @@ def load_cfg() -> dict:
         cfg["profile"] = spec.get("profile") or cfg.get("profile")
         cfg["scoring_weights"] = spec.get("scoring_weights") or cfg.get("scoring_weights")
     return cfg
+
+
+def _trim(text: str, n: int = 200) -> str:
+    t = (text or "").strip()
+    if len(t) <= n:
+        return t
+    return t[:n].rsplit(" ", 1)[0] + "…"
 
 
 class _Opp:
@@ -103,7 +110,21 @@ class Pipeline:
             dbm.kv_set(self.con, k, (dbm.kv_get(self.con, k) or 0) + got)
         for j in jobs:
             dbm.upsert_opportunity(self.con, j)
-        survivors = funnel.hard_constraints(self.con, jobs, cfg, now)
+        evaled = {r["opp_key"]: r["ts"] for r in self.con.execute(
+            "SELECT opp_key, MAX(ts) ts FROM flight WHERE stage='deep_eval' "
+            "GROUP BY opp_key")}
+        fresh = []
+        for j in jobs:
+            t = evaled.get(j.key)
+            row = self.con.execute("SELECT last_signal, status FROM opportunities "
+                                   "WHERE key=?", (j.key,)).fetchone()
+            if row and row["status"] == "delivered":
+                continue
+            if t and (not row or (row["last_signal"] or 0) <= t):
+                continue  # already evaluated, nothing new since
+            fresh.append(j)
+        LOG.info("%d fetched, %d new-or-resignaled", len(jobs), len(fresh))
+        survivors = funnel.hard_constraints(self.con, fresh, cfg, now)
         kept = funnel.triage(self.con, survivors, cfg)
         screened = funnel.screen(self.con, kept, cfg)
         evaluated = funnel.deep_eval(self.con, screened, cfg)
@@ -160,8 +181,8 @@ class Pipeline:
                      location=r["location"] or "", salary=r["salary"] or "")
             evaluated.append({"job": j, "score": r["s"], "dims": det.get("dims") or {},
                               "verdict": det.get("verdict") or "WATCH",
-                              "blurb": (r["description"] or r["title"])[:200],
-                              "risk": ""})
+                              "blurb": det.get("blurb") or _trim(r["description"] or r["title"]),
+                              "risk": det.get("risk") or ""})
         bar_delta = dbm.kv_get(self.con, "bar_delta") or 0
         funnel.BAR = 80.0 + bar_delta
         picked, near = funnel.select_daily(self.con, evaluated, time.time())

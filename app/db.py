@@ -71,9 +71,13 @@ def upsert_opportunity(con, job, role_family: str = "") -> str:
     row = cur.fetchone()
     sig = {"ts": now, "type": "posting_seen", "source": job.source}
     if row:
-        log = json.loads(row["signal_log"]); log.append(sig)
-        con.execute("UPDATE opportunities SET last_signal=?, signal_log=? WHERE key=?",
-                    (now, json.dumps(log[-40:]), key))
+        log = json.loads(row["signal_log"])
+        dup = any(s.get("type") == "posting_seen" and s.get("source") == job.source
+                  and now - s.get("ts", 0) < 86400 for s in log[-8:])
+        if not dup:
+            log.append(sig)
+            con.execute("UPDATE opportunities SET last_signal=?, signal_log=? WHERE key=?",
+                        (now, json.dumps(log[-40:]), key))
     else:
         con.execute("""INSERT INTO opportunities(key,company,role_family,title,url,location,
                     salary,description,source,first_seen,last_signal,posted_at,signal_log)
