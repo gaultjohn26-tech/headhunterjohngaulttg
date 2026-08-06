@@ -19,7 +19,11 @@ from .bot import Bot
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
 LOG = logging.getLogger("main")
-NY = ZoneInfo("America/New_York")
+try:
+    NY = ZoneInfo("America/New_York")
+except Exception:
+    import datetime as _dt
+    NY = _dt.timezone(_dt.timedelta(hours=-5), "ET")
 SCAN_EVERY_H = 3
 FLASH_BAR = 92
 ROOT = dbm.DB_PATH.parent.parent
@@ -235,8 +239,8 @@ async def run():
             await asyncio.sleep(120)
 
     async with bot.app:
-        await bot.app.start()
         await bot.app.updater.start_polling()
+        await bot.app.start()
         LOG.info("bot polling; pipeline loop running")
         await loop()
 

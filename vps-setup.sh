@@ -29,7 +29,7 @@ done
 grep -q TELEGRAM_BOT_TOKEN "$ENVF" || { echo "TELEGRAM_BOT_TOKEN is required."; exit 1; }
 
 echo "-- building (first build downloads the AI model; takes a few minutes) --"
-docker build -q -t headhunter /opt/headhunter
+docker build -t headhunter /opt/headhunter
 docker rm -f headhunter 2>/dev/null || true
 mkdir -p /opt/headhunter-data
 docker run -d --name headhunter --restart=always \
@@ -41,7 +41,7 @@ cd /opt/headhunter || exit 0
 git fetch -q origin
 if [ "$(git rev-parse HEAD)" != "$(git rev-parse @{u})" ]; then
   git pull -q --ff-only
-  docker build -q -t headhunter /opt/headhunter
+  docker build -t headhunter /opt/headhunter
   docker rm -f headhunter 2>/dev/null || true
   docker run -d --name headhunter --restart=always \
     --env-file /opt/headhunter/.env -v /opt/headhunter-data:/app/data headhunter

@@ -61,6 +61,7 @@ class Bot:
         self.app.add_handler(CommandHandler("why", self.on_why))
         self.app.add_handler(CommandHandler("status", self.on_status))
         self.app.add_handler(CommandHandler("scan", self.on_scan))
+        self.app.add_handler(CommandHandler("drop", self.on_drop))
         self.app.add_handler(CallbackQueryHandler(self.on_button))
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_text))
 
@@ -198,6 +199,15 @@ class Bot:
         await update.message.reply_text(
             f"Scan done: {stats.get('scanned', 0)} items, "
             f"{stats.get('flashed', 0)} exceptional flash(es) sent.")
+
+    async def on_drop(self, update: Update, _):
+        await update.message.reply_text("Building a drop from the last 24h of evaluations…")
+        picked, near, stats = self.pipeline.select_daily()
+        if not picked and not near:
+            await update.message.reply_text(
+                "Nothing evaluated in the last 24h yet — send /scan first, then /drop.")
+            return
+        await self.send_daily(picked, near, stats)
 
     # ------------------------------------------------------------ Sunday brief
     async def send_sunday(self, brief: dict):
