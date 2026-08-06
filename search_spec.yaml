@@ -1,0 +1,62 @@
+# ============================================================
+# search_spec.yaml — the canonical, machine-readable spec.
+# The pipeline loads this at runtime: `profile` and
+# `scoring_weights` here OVERRIDE config.yaml. Edit this file
+# to change what "a good job" means; edit config.yaml to
+# change where and how jobs are found.
+# ============================================================
+version: 3
+owner_confirmed:            # stated directly by you in conversation
+  industries: [crypto/web3/digital-assets, venture-capital, private-equity,
+               incubation/acceleration, investment-funds, fintech, trading]
+  role_families:
+    - business development & partnerships (explicitly NOT traditional sales)
+    - research (markets, economics, crypto, investment, strategy)
+    - vc/pe investing & platform roles
+    - investor relations, fund operations, portfolio operations
+  work_arrangements: [full-time, part-time, contract, fractional, advisory]
+  location: remote only
+  meeting_intensity: minimal — hard preference
+  delivery: daily email digest
+  depth_mandate: maximum practical aggregation; boards + majors + employers
+  budget_ceiling_monthly_usd: 300
+  compensation_floor: none — judge holistically (cash, equity, tokens, upside)
+  seniority: any — fit over title
+  hard_exclusions: [quota/meeting-heavy sales roles, software engineering,
+                    design, nursing/healthcare, recruiting, customer support]
+inferred_standing:          # assumed; correct any line and recommit
+  timezone: US-hours friendly preferred, global acceptable
+  exceptional_opportunity: top-tier firm, outsized comp/equity/tokens, or rare
+    access — may override the meeting-intensity preference
+  employer_universe: the 124 named candidates in config.yaml plus every new
+    employer auto-discovered from aggregator results
+
+profile: |
+  Candidate: broad-range operator with experience across finance, economics,
+  trading, and startups. Multiple prior jobs with very wide responsibilities;
+  resume adapts across the whole spectrum below. No hard compensation floor —
+  judge total opportunity holistically (cash, equity, tokens, upside, access).
+  Seniority is open: fit over title, junior through executive.
+
+  Target roles, in priority order:
+  1. Crypto / web3 / digital assets — any strong non-engineering role.
+  2. Business development & partnerships — but NOT traditional sales:
+     no quota-carrying, cold-calling, or meeting-heavy AE-style roles.
+     Minimal meetings is a hard preference.
+  3. Research — markets, economics, crypto, investment, strategy.
+  4. VC / PE / investing / incubation and adjacent: investor relations,
+     fund operations, portfolio operations, platform roles, scout programs.
+
+  Score high: fully remote; low-touch, async, deliverable-based, easily
+  systematized; OR a genuinely exceptional opportunity worth real involvement
+  (top-tier firm, outsized economics, rare access) even if less low-touch.
+  Score low: on-site/hybrid, meeting-heavy calendars, traditional sales
+  quotas, hands-on engineering or design work.
+
+scoring_weights:
+  career_and_experience_fit: 30
+  compensation_and_upside: 20
+  company_quality: 15
+  autonomy_and_low_meeting_burden: 15
+  remote_compatibility: 10
+  strategic_network_and_learning: 10

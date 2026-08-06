@@ -1,0 +1,393 @@
+# ============================================================
+#  job-digest configuration — full-aggregation build
+#  Edit on GitHub, commit; next run picks it up.
+# ============================================================
+
+profile: |
+  Candidate: broad-range operator with experience across finance, economics,
+  trading, and startups. Has held multiple jobs with very wide
+  responsibilities; resume adapts across the whole spectrum below.
+
+  Target roles, in priority order:
+  1. Crypto / web3 / digital assets — any strong non-engineering role.
+  2. Business development & partnerships — but NOT traditional sales:
+     no quota-carrying, cold-calling, or meeting-heavy AE-style roles.
+     Minimal meetings is a hard preference.
+  3. Research — markets, economics, crypto, investment, strategy research.
+  4. Venture capital / investing / private equity / incubation, and
+     VC-adjacent roles: investor relations, fund operations, portfolio
+     operations, platform roles at funds, scout programs.
+
+  Score high: fully remote; low-touch and async-friendly (few meetings,
+  deliverable-based, easily systematized or automated); OR a genuinely
+  exceptional opportunity worth real involvement.
+  Score low: on-site/hybrid, meeting-heavy calendars, traditional sales
+  quotas, hands-on software engineering or design work.
+
+# ---- AI ranking ---------------------------------------------
+ai_ranking: true
+screen_model: claude-haiku-4-5
+deep_model: claude-sonnet-4-6
+min_score: 60
+max_jobs_per_email: 15
+rank_candidates_max: 100     # deep funnel; ~4-5 cents/day at this cap
+
+# ---- Filters (cheap screen BEFORE the AI ranker) ------------
+max_age_days: 7
+require_remote: true
+
+include_keywords:
+  - crypto
+  - web3
+  - blockchain
+  - defi
+  - digital asset
+  - stablecoin
+  - tokenization
+  - business development
+  - partnership
+  - research
+  - analyst
+  - venture
+  - private equity
+  - investor relations
+  - investment
+  - fund
+  - portfolio
+  - incubat
+  - accelerator
+  - trading
+  - economist
+  - economics
+  - strategy
+  - treasury
+  - operations
+  - chief of staff
+  - due diligence
+  - capital
+  - ecosystem
+  - grants
+
+exclude_keywords:            # TITLE matches only
+  - account executive
+  - sales development
+  - sales representative
+  - inside sales
+  - field sales
+  - software engineer
+  - developer
+  - frontend
+  - front end
+  - backend
+  - full stack
+  - devops
+  - designer
+  - nurse
+  - physician
+  - recruiter
+  - customer support
+
+# ============================================================
+# SOURCES — 18 fetchers across 4 layers
+# Aggregators activate when their key secret exists; missing
+# keys log "skipped" and everything else runs regardless.
+# ============================================================
+sources:
+  # --- Layer 1: remote job boards (no keys) ---
+  remotive:
+    enabled: true
+    searches: [crypto, "business development", "research analyst", venture, "investor relations", treasury, "private equity", partnerships]
+  remoteok:
+    enabled: true
+  jobicy:
+    enabled: true
+    tags: [crypto, "business development", finance, analyst, marketing]
+  themuse:
+    enabled: true
+    pages: 4
+    categories: []
+  arbeitnow:
+    enabled: true
+  hackernews:
+    enabled: true
+  rss:                        # niche boards without APIs — add any feed URL
+    enabled: true
+    feeds:
+      - {name: cryptojobslist, url: "https://cryptojobslist.com/jobs.rss?jobLocation=Remote"}
+      - {name: weworkremotely, url: "https://weworkremotely.com/remote-jobs.rss"}
+      # - {name: jobspresso, url: "https://jobspresso.co/feed/"}
+
+  # --- Layer 2: major-site aggregators ---
+  adzuna:                     # thousands of boards; free key, queries cost nothing
+    enabled: true
+    country: us
+    searches:
+      - crypto business development remote
+      - web3 partnerships remote
+      - digital assets analyst remote
+      - venture capital analyst remote
+      - venture capital associate remote
+      - private equity research remote
+      - private equity associate remote
+      - investor relations remote
+      - fund operations remote
+      - portfolio operations remote
+      - crypto research analyst remote
+      - market research economist remote
+      - trading research analyst remote
+      - investment analyst remote
+      - strategy research remote
+      - treasury analyst remote
+  jooble:                     # major-board aggregator; free key
+    enabled: true
+    searches:
+      - crypto business development
+      - web3 partnerships
+      - venture capital analyst
+      - private equity research
+      - investor relations
+      - fund operations
+      - crypto research
+      - investment analyst
+      - digital assets
+      - trading analyst
+  jsearch:                    # Google for Jobs = LinkedIn, Indeed, Glassdoor,
+    enabled: true             #   ZipRecruiter, Monster + public web
+    date_posted: 3days
+    pages: 2
+    # BUDGET: requests/day ~= (search lines x pages). Defaults below assume
+    # the verified $25/mo OpenWeb Ninja plan (10,000 req/mo): 45 lines x 2
+    # pages x 31 days ~= 2,800/mo — under a third of quota. On the FREE tier
+    # (200/mo) set pages: 1 and daily_request_budget: 6 instead.
+    daily_request_budget: 100
+    searches:
+      - crypto business development remote
+      - venture capital analyst remote
+      - investor relations remote
+      - web3 partnerships remote
+      - private equity research analyst remote
+      - crypto research analyst remote
+      - digital assets business development remote
+      - blockchain partnerships remote
+      - defi business development remote
+      - stablecoin partnerships remote
+      - tokenization business development remote
+      - crypto ecosystem lead remote
+      - web3 grants program remote
+      - crypto operations remote
+      - exchange listings manager remote
+      - venture capital associate remote
+      - venture capital platform remote
+      - vc scout program remote
+      - private equity associate remote
+      - growth equity analyst remote
+      - fund operations remote
+      - fund administration analyst remote
+      - portfolio operations remote
+      - portfolio support analyst remote
+      - investor relations associate remote
+      - LP relations remote
+      - capital formation remote
+      - fundraising associate remote
+      - incubator program manager remote
+      - accelerator program remote
+      - venture studio remote
+      - market research analyst finance remote
+      - economic research analyst remote
+      - macro research analyst remote
+      - equity research associate remote
+      - crypto market analyst remote
+      - trading desk analyst remote
+      - quantitative research analyst remote
+      - due diligence analyst remote
+      - investment research remote
+      - strategy analyst remote
+      - corporate development analyst remote
+      - treasury analyst remote
+      - chief of staff investment remote
+      - business operations analyst remote
+
+  # --- Layer 3: specialized crypto board ---
+  web3career:
+    enabled: true
+
+  # --- Layer 4: company watchlists (per-company ATS boards) ---
+  # Manual lists below are merged with watchlist_resolved.json, which the
+  # weekly "Resolve watchlist" workflow builds from watchlist_candidates.
+  greenhouse:
+    enabled: true
+    companies: [coinbase, uniswaplabs, consensys, circle, chainalysis, gemini, ripple, paxos, alchemy]
+  lever:
+    enabled: true
+    companies: [kraken, ledger]
+  ashby:
+    enabled: true
+    companies: [ramp, mercury]
+  workable:
+    enabled: true
+    companies: []
+  smartrecruiters:
+    enabled: true
+    companies: []
+  recruitee:
+    enabled: true
+    companies: []
+  workday:                    # big banks / asset managers post here.
+    enabled: true             # Paste careers URLs exactly as they appear:
+    urls: []                  #   e.g. "https://tenant.wd5.myworkdayjobs.com/SiteName"
+  bamboohr:                   # <slug>.bamboohr.com — auto-filled by resolver
+    enabled: true
+    companies: []
+  pinpoint:                   # <slug>.pinpointhq.com — auto-filled by resolver
+    enabled: true
+    companies: []
+  teamtailor:                 # <slug>.teamtailor.com — auto-filled by resolver
+    enabled: true
+    companies: []
+
+  # --- Layer 5: enterprise feed (ATS-crawled + LinkedIn-derived, deduped) ---
+  theirstack:                 # activates with THEIRSTACK_API_KEY
+    enabled: true             # 1 credit = 1 job record returned
+    max_age_days: 1             # only pull the last day's postings
+    plan_credits_month: 30000   # set to YOUR plan's credit allotment; the
+                                # scheduler paces spend evenly across the month
+    title_patterns: [crypto, web3, blockchain, "business development",
+                     partnerships, "venture capital", "private equity",
+                     "investor relations", "research analyst", "fund operations",
+                     treasury, "portfolio operations"]
+
+# ---- Watchlist candidates -----------------------------------
+# Company NAMES only — the weekly resolver probes all six ATS platforms,
+# finds each company's live board, and adds it automatically. Wrong or
+# unresolvable names are simply reported. Add freely.
+watchlist_candidates:
+  # crypto: exchanges, infra, custody, compliance, data
+  - binance
+  - okx
+  - bybit
+  - crypto.com
+  - bitstamp
+  - bitpanda
+  - moonpay
+  - transak
+  - fireblocks
+  - anchorage digital
+  - bitgo
+  - copper
+  - taxbit
+  - trm labs
+  - elliptic
+  - blockdaemon
+  - figment
+  - galaxy digital
+  - grayscale
+  - blockchain.com
+  - opensea
+  - magic eden
+  - phantom
+  - exodus
+  # crypto: protocols and labs
+  - polygon
+  - ava labs
+  - solana foundation
+  - offchain labs
+  - op labs
+  - starkware
+  - matter labs
+  - eigen labs
+  - celestia
+  - wormhole foundation
+  - lido
+  - aave
+  - chainlink labs
+  - ethereum foundation
+  - near foundation
+  - aptos labs
+  - sui foundation
+  - berachain
+  - monad
+  - story protocol
+  # crypto: research, data, media
+  - messari
+  - nansen
+  - kaiko
+  - dune
+  - the block
+  - blockworks
+  - delphi digital
+  - coingecko
+  - glassnode
+  - chainforensics
+  # trading firms and market makers
+  - wintermute
+  - gsr
+  - b2c2
+  - flow traders
+  - imc trading
+  - optiver
+  - drw
+  - jump trading
+  - hudson river trading
+  - virtu financial
+  - amber group
+  - cumberland
+  - keyrock
+  # fintech
+  - stripe
+  - plaid
+  - brex
+  - wise
+  - revolut
+  - affirm
+  - marqeta
+  - chime
+  - block
+  - robinhood
+  - etoro
+  - public.com
+  - alpaca
+  # venture capital and private equity
+  - a16z
+  - andreessen horowitz
+  - sequoia capital
+  - paradigm
+  - pantera capital
+  - polychain capital
+  - dragonfly
+  - multicoin capital
+  - electric capital
+  - haun ventures
+  - variant fund
+  - placeholder
+  - framework ventures
+  - 1confirmation
+  - blockchain capital
+  - coinfund
+  - castle island ventures
+  - hack vc
+  - union square ventures
+  - first round capital
+  - founders fund
+  - general catalyst
+  - lightspeed venture partners
+  - accel
+  - index ventures
+  - bessemer venture partners
+  - insight partners
+  - craft ventures
+  - felicis
+  - ribbit capital
+  - qed investors
+  - khosla ventures
+  - greylock
+  - initialized capital
+  - tiger global
+  - coatue
+  - thrive capital
+  - general atlantic
+  - blackstone
+  - kkr
+  - carlyle
+  - apollo global management
+  - tpg
+  - vista equity partners
