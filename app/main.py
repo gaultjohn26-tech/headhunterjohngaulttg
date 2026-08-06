@@ -15,6 +15,7 @@ import yaml
 
 from . import db as dbm
 from . import funnel, ingest, planner, signals
+from . import VERSION
 from .bot import Bot
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
@@ -97,6 +98,29 @@ class Pipeline:
             self.con.execute(
                 "INSERT INTO sources(name,fail_streak) VALUES(?,1) "
                 "ON CONFLICT(name) DO UPDATE SET fail_streak=fail_streak+1", (name,))
+
+    def debug_sources(self) -> str:
+        """Re-run every degraded source once; return real errors as text."""
+        cfg = self._apply_planner_and_pacing()
+        bad = [r["name"] for r in self.con.execute(
+            "SELECT name FROM sources WHERE fail_streak>=1 ORDER BY name")]
+        keyless = [n for n in ingest.KEYED_SOURCES if not ingest._has_key(n)]
+        lines = []
+        for name in bad:
+            fn = ingest.SOURCES.get(name)
+            scfg = dict((cfg.get("sources") or {}).get(name) or {})
+            if not fn or not scfg.get("enabled", False):
+                continue
+            try:
+                got = fn(scfg)
+                lines.append(f"✅ {name}: recovered — {len(got)} items just now")
+            except Exception as exc:  # noqa: BLE001
+                lines.append(f"❌ {name}: {type(exc).__name__}: {str(exc)[:400]}")
+        for n in keyless:
+            lines.append(f"⏸ {n}: no key entered — waiting, not broken")
+        if not lines:
+            lines = ["All sources healthy — nothing to probe."]
+        return "\n".join(lines)
 
     def scan(self) -> dict:
         cfg = self._apply_planner_and_pacing()
@@ -262,7 +286,17 @@ async def run():
     async with bot.app:
         await bot.app.updater.start_polling()
         await bot.app.start()
-        LOG.info("bot polling; pipeline loop running")
+        LOG.info("bot polling; pipeline loop running (v%s)", VERSION)
+        chat = dbm.kv_get(con, "chat_id")
+        if chat and dbm.kv_get(con, "code_version") != VERSION:
+            try:
+                await bot.app.bot.send_message(
+                    chat, f"⬆ Updated to v{VERSION}. New: /debug sends any source's "
+                          "real error straight here — the terminal era is over.")
+            except Exception:  # noqa: BLE001
+                pass
+            dbm.kv_set(con, "code_version", VERSION)
+            con.commit()
         await loop()
 
 

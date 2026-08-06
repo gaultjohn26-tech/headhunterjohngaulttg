@@ -462,7 +462,7 @@ def fetch_jsearch(scfg: dict) -> list[Job]:
         data, last_exc = None, None
         for ep in list(endpoints):
             try:
-                data = http_get_json_extra(
+                cand = http_get_json_extra(
                     ep,
                     params={
                         "query": q, "page": 1, "num_pages": int(scfg.get("pages") or 1),
@@ -471,6 +471,10 @@ def fetch_jsearch(scfg: dict) -> list[Job]:
                     },
                     headers=auth_headers,
                 )
+                rows_chk = cand.get("data") if isinstance(cand, dict) else None
+                if not isinstance(rows_chk, list):
+                    raise ValueError(f"unexpected reply from {ep}: {str(cand)[:200]}")
+                data = cand
                 if ep != endpoints[0]:
                     endpoints.remove(ep); endpoints.insert(0, ep)  # remember winner
                 break
@@ -479,6 +483,8 @@ def fetch_jsearch(scfg: dict) -> list[Job]:
         if data is None:
             raise last_exc
         for j in data.get("data") or []:
+            if not isinstance(j, dict):
+                continue
             city = j.get("job_city") or ""
             country = j.get("job_country") or ""
             loc = ", ".join(x for x in (city, country) if x)

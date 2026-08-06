@@ -2,6 +2,7 @@
 verdicts, forward-anything regret intake, /why, Sunday brief, canaries."""
 from __future__ import annotations
 
+import asyncio
 import html
 import json
 import logging
@@ -14,6 +15,7 @@ from telegram.constants import ParseMode
 from telegram.ext import (Application, CallbackQueryHandler, CommandHandler,
                           ContextTypes, MessageHandler, filters)
 
+from . import VERSION
 from . import db as dbm
 from . import regret as regret_mod
 
@@ -62,6 +64,7 @@ class Bot:
         self.app.add_handler(CommandHandler("status", self.on_status))
         self.app.add_handler(CommandHandler("scan", self.on_scan))
         self.app.add_handler(CommandHandler("drop", self.on_drop))
+        self.app.add_handler(CommandHandler("debug", self.on_debug))
         self.app.add_handler(CallbackQueryHandler(self.on_button))
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_text))
 
@@ -169,6 +172,13 @@ class Bot:
         await update.message.reply_text(regret_mod.regret_card(pm))
 
     # ------------------------------------------------------------ commands
+    async def on_debug(self, update: Update, _):
+        await update.message.reply_text("Probing sources — errors will appear here, "
+                                        "in the API's own words…")
+        report = await asyncio.to_thread(self.pipeline.debug_sources)
+        for i in range(0, len(report), 3500):
+            await update.message.reply_text(report[i:i + 3500])
+
     async def on_why(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         n = int(ctx.args[0]) if ctx.args else 1
         rows = self.con.execute(
@@ -191,7 +201,8 @@ class Bot:
         n_opp = self.con.execute("SELECT COUNT(*) c FROM opportunities").fetchone()["c"]
         await update.message.reply_text(
             f"{n_opp:,} opportunities tracked · {live}/{len(srcs)} sources healthy"
-            + (f" · degraded: {', '.join(bad)}" if bad else ""))
+            + (f" · degraded: {', '.join(bad)}" if bad else "")
+            + f" · v{VERSION}")
 
     async def on_scan(self, update: Update, _):
         await update.message.reply_text("Manual scan started…")
