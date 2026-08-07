@@ -115,7 +115,11 @@ class Pipeline:
                 got = fn(scfg)
                 lines.append(f"✅ {name}: recovered — {len(got)} items just now")
             except Exception as exc:  # noqa: BLE001
-                lines.append(f"❌ {name}: {type(exc).__name__}: {str(exc)[:400]}")
+                body = ""
+                r = getattr(exc, "response", None)
+                if r is not None:
+                    body = f"\n   ↳ {r.text[:300]}"
+                lines.append(f"❌ {name}: {type(exc).__name__}: {str(exc)[:300]}{body}")
         for n in keyless:
             lines.append(f"⏸ {n}: no key entered — waiting, not broken")
         if not lines:
@@ -293,7 +297,11 @@ async def run():
         if chat and dbm.kv_get(con, "code_version") != VERSION:
             try:
                 await bot.app.bot.send_message(
-                    chat, f"⬆ Updated to v{VERSION}: drops now always deliver the "
+                    chat, f"⬆ Updated to v{VERSION}: crypto priority bias removed — all four "
+                          "families score equally · employer universe (VC/PE/fintech/AI) "
+                          "wires in now and persists · JSearch survives slow queries · "
+                          "TheirStack self-diagnoses rejections · /debug shows full API "
+                          "error text · repost links penalized."
                           "day's best (below-bar items labeled with scores) · fairer "
                           "scoring on missing info · TheirStack + JSearch rebuilt from "
                           "official docs · commands no longer queue behind scans.")
@@ -301,6 +309,22 @@ async def run():
                 pass
             dbm.kv_set(con, "code_version", VERSION)
             con.commit()
+
+        async def _resolve_once():
+            try:
+                if not ingest.RESOLVED_PATH.exists():
+                    LOG.info("first-boot watchlist resolve starting")
+                    await asyncio.to_thread(ingest.resolve_watchlist,
+                                            pipe._apply_planner_and_pacing())
+                    n = sum(len(v) for v in ingest.load_resolved().values())
+                    if chat:
+                        await bot.app.bot.send_message(
+                            chat, f"🧭 Employer universe wired: {n} company boards "
+                                  "now fully ingested — VC, PE, fintech, and AI "
+                                  "included. The next scan reads all of them.")
+            except Exception as exc:  # noqa: BLE001
+                LOG.warning("startup resolver failed: %s", exc)
+        asyncio.create_task(_resolve_once())
         await loop()
 
 

@@ -26,6 +26,7 @@ import logging
 import os
 import re
 import sys
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -458,6 +459,7 @@ def fetch_jsearch(scfg: dict) -> list[Job]:
                         "X-RapidAPI-Host": "jsearch.p.rapidapi.com"}
     out: list[Job] = []
     budget = int(scfg.get("daily_request_budget") or 999)
+    failed_queries: list = []
     for q in (scfg.get("searches") or [])[:budget]:
         params = {"query": q, "date_posted": scfg.get("date_posted") or "3days"}
         if own_key:
@@ -465,21 +467,31 @@ def fetch_jsearch(scfg: dict) -> list[Job]:
         else:
             params.update({"page": 1, "num_pages": int(scfg.get("pages") or 1),
                            "remote_jobs_only": "true"})
-        data, last_exc = None, None
+        data, q_errors = None, []
         for ep in list(endpoints):
-            try:
-                cand = http_get_json_extra(ep, params=params, headers=auth_headers)
-                rows_chk = cand.get("data") if isinstance(cand, dict) else None
-                if not isinstance(rows_chk, list):
-                    raise ValueError(f"unexpected reply from {ep}: {str(cand)[:200]}")
-                data = cand
-                if ep != endpoints[0]:
-                    endpoints.remove(ep); endpoints.insert(0, ep)  # remember winner
+            for attempt in (1, 2):
+                try:
+                    cand = http_get_json_extra(ep, params=params,
+                                               headers=auth_headers, timeout=45)
+                    rows_chk = cand.get("data") if isinstance(cand, dict) else None
+                    if not isinstance(rows_chk, list):
+                        raise ValueError(f"unexpected reply from {ep}: {str(cand)[:200]}")
+                    data = cand
+                    if ep != endpoints[0]:
+                        endpoints.remove(ep); endpoints.insert(0, ep)
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    q_errors.append(f"{ep.rsplit('/', 1)[-1]}#{attempt}: {exc}")
+                    if str(exc).lstrip()[:3] in ("500", "502", "503", "504") and attempt == 1:
+                        time.sleep(2)
+                        continue
+                    break
+            if data is not None:
                 break
-            except Exception as exc:  # noqa: BLE001
-                last_exc = exc
         if data is None:
-            raise last_exc
+            LOG.warning("jsearch query %r failed: %s", q, " | ".join(q_errors)[:300])
+            failed_queries.append(q)
+            continue
         for j in data.get("data") or []:
             if not isinstance(j, dict):
                 continue
@@ -509,6 +521,9 @@ def fetch_jsearch(scfg: dict) -> list[Job]:
                     ),
                 )
             )
+    if not out and failed_queries:
+        raise RuntimeError(f"all {len(failed_queries)} jsearch queries failed; "
+                           f"last: {failed_queries[-1]}")
     return out
 
 
@@ -835,7 +850,7 @@ def fetch_rss(scfg: dict) -> list[Job]:
 # ATS platforms and record which board answers. Run weekly by its own
 # workflow; the daily run merges the results in automatically.
 # ---------------------------------------------------------------------------
-RESOLVED_PATH = ROOT / "watchlist_resolved.json"
+RESOLVED_PATH = ROOT.parent / "data" / "watchlist_resolved.json"  # survives rebuilds
 ATS_PLATFORMS = ("greenhouse", "lever", "ashby", "workable",
                  "smartrecruiters", "recruitee", "bamboohr", "pinpoint",
                  "teamtailor")
@@ -939,6 +954,7 @@ def resolve_watchlist(cfg: dict) -> int:
             unresolved.append(name)
             print(f"  ----- {name:>28s} -> no public board found")
 
+    RESOLVED_PATH.parent.mkdir(parents=True, exist_ok=True)
     RESOLVED_PATH.write_text(json.dumps(
         {"resolved": {a: sorted(set(v)) for a, v in resolved.items() if v},
          "unresolved": sorted(unresolved),
@@ -1034,26 +1050,36 @@ def fetch_theirstack(scfg: dict) -> list[Job]:
     if not key:
         LOG.info("theirstack   skipped (no THEIRSTACK_API_KEY)")
         return []
-    body = {  # documented fields only: theirstack.com/en/docs/api-reference
-        "page": 0,
-        "limit": int(scfg.get("daily_record_limit") or 100),
-        "posted_at_max_age_days": int(scfg.get("max_age_days") or 1),
-        "order_by": [{"desc": True, "field": "date_posted"},
-                     {"desc": True, "field": "discovered_at"}],
-    }
-    if scfg.get("title_patterns"):
-        body["job_title_or"] = scfg["title_patterns"]
-    resp = requests.post(
-        "https://api.theirstack.com/v1/jobs/search",
-        json=body, timeout=45,
-        headers={"Authorization": f"Bearer {key}",
-                 "Content-Type": "application/json",
-                 "User-Agent": USER_AGENT},
-    )
-    if not resp.ok:
-        LOG.warning("theirstack HTTP %s: %s", resp.status_code, resp.text[:300])
-    resp.raise_for_status()
-    payload = resp.json()
+    hdrs = {"Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            "User-Agent": USER_AGENT}
+    base = {"page": 0,
+            "limit": int(scfg.get("daily_record_limit") or 100),
+            "posted_at_max_age_days": int(scfg.get("max_age_days") or 1)}
+    order = [{"desc": True, "field": "date_posted"}]
+    titles = scfg.get("title_patterns") or []
+    variants = [("full", {**base, "order_by": order,
+                          **({"job_title_or": titles} if titles else {})}),
+                ("no_order_by", {**base,
+                                 **({"job_title_or": titles} if titles else {})}),
+                ("no_titles", {**base, "order_by": order}),
+                ("minimal", dict(base))]
+    payload, last_err = None, ""
+    for label, body in variants:
+        resp = requests.post("https://api.theirstack.com/v1/jobs/search",
+                             json=body, timeout=45, headers=hdrs)
+        if resp.ok:
+            payload = resp.json()
+            if label != "full":
+                LOG.warning("theirstack: %r variant accepted -- full payload was "
+                            "rejected with %s", label, last_err[:200])
+            break
+        last_err = f"HTTP {resp.status_code}: {resp.text[:250]}"
+        LOG.warning("theirstack %s rejected -- %s", label, last_err)
+        if resp.status_code != 422:
+            break
+    if payload is None:
+        raise RuntimeError(f"theirstack failed on all payload variants; {last_err}")
     rows = payload.get("data") or payload.get("jobs") or []
     out: list[Job] = []
     for j in rows:
@@ -1186,6 +1212,8 @@ def prefilter(jobs: list[Job], cfg: dict, now: datetime) -> list[Job]:
     seen_pairs: set[tuple[str, str]] = set()
     for j in jobs:
         if not j.title or not j.url:
+            continue
+        if any(b in j.url for b in cfg.get("url_blocklist") or []):
             continue
         age = j.age_days(now)
         if age is not None and age > max_age:

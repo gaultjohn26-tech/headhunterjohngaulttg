@@ -22,11 +22,11 @@ POSTING_HALF_LIFE_D = 6.0  # posted roles decay ~5-7d; signals reset clock
 SIGNAL_HALF_LIFE_D = 30.0
 
 _ANCHORS = """Reference points (score relative to these, held constant):
-A1=95: Remote Head of BD at a top-tier crypto custodian, deliverable-led,
+A1=95: Remote Head of BD at a category-leading company or top-tier fund, deliverable-led,
   async culture, $200k+ meaningful equity, direct exec exposure.
 A2=85: Remote VC platform/research associate at a respected fund, moderate
   meetings, strong network value, mid comp.
-A3=70: Remote crypto ecosystem/partnerships role at a mid protocol, decent
+A3=70: Remote partnerships/ecosystem role at a mid-sized company, decent
   comp, unclear autonomy.
 A4=50: Hybrid corp-dev analyst at an unremarkable fintech, heavy meetings.
 A5=30: Quota-carrying SaaS AE role relabeled "partnerships"."""
@@ -180,6 +180,14 @@ def screen(con, jobs, cfg) -> list:
     return keep[:DEEP_KEEP * 2]
 
 
+def _host(url: str) -> str:
+    try:
+        from urllib.parse import urlparse
+        return urlparse(url or "").netloc
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def deep_eval(con, jobs, cfg) -> list[dict]:
     """Anchored, dimension-scored evaluation on the best model tier."""
     out: list[dict] = []
@@ -196,7 +204,8 @@ def deep_eval(con, jobs, cfg) -> list[dict]:
             continue
         listing = "\n".join(
             f"j{n}: title={j.title} | company={j.company} | loc={j.location} | "
-            f"salary={j.salary} | src={j.source} | desc={(j.description or '')[:700]}"
+            f"salary={j.salary} | src={j.source} | host={_host(j.url)} | "
+            f"desc={(j.description or '')[:700]}"
             for n, j in enumerate(batch))
         w = cfg.get("scoring_weights") or {}
         prompt = (
@@ -216,7 +225,9 @@ def deep_eval(con, jobs, cfg) -> list[dict]:
               "expected value from what IS stated and put uncertainty in risk. "
               "A strong-fit role at a strong company with typical unknowns "
               "belongs in the 80s. Only positive evidence of meeting-heavy or "
-              "quota patterns caps the score at 60.\n\n" + listing)
+              "quota patterns caps the score at 60. If host= is a repost or "
+              "aggregator site rather than the employer or a major job board, "
+              "note 'unverified listing' in risk and score conservatively.\n\n" + listing)
         try:
             txt = _claude(model, prompt, 3500)
             arr = json.loads(txt[txt.find("["):txt.rfind("]") + 1])

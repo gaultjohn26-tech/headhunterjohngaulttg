@@ -36,6 +36,9 @@ rank_candidates_max: 100     # deep funnel; ~4-5 cents/day at this cap
 max_age_days: 7
 require_remote: true
 
+url_blocklist:              # repost/spam domains — never deliver these links
+  - mysmartpros.com
+
 include_keywords:
   - crypto
   - web3
