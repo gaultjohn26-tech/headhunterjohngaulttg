@@ -15,6 +15,7 @@ import yaml
 
 from . import db as dbm
 from . import funnel, ingest, planner, signals
+from . import VERSION
 from .bot import Bot
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
@@ -37,6 +38,13 @@ def load_cfg() -> dict:
         cfg["profile"] = spec.get("profile") or cfg.get("profile")
         cfg["scoring_weights"] = spec.get("scoring_weights") or cfg.get("scoring_weights")
     return cfg
+
+
+def _trim(text: str, n: int = 200) -> str:
+    t = (text or "").strip()
+    if len(t) <= n:
+        return t
+    return t[:n].rsplit(" ", 1)[0] + "…"
 
 
 class _Opp:
@@ -91,6 +99,29 @@ class Pipeline:
                 "INSERT INTO sources(name,fail_streak) VALUES(?,1) "
                 "ON CONFLICT(name) DO UPDATE SET fail_streak=fail_streak+1", (name,))
 
+    def debug_sources(self) -> str:
+        """Re-run every degraded source once; return real errors as text."""
+        cfg = self._apply_planner_and_pacing()
+        bad = [r["name"] for r in self.con.execute(
+            "SELECT name FROM sources WHERE fail_streak>=1 ORDER BY name")]
+        keyless = [n for n in ingest.KEYED_SOURCES if not ingest._has_key(n)]
+        lines = []
+        for name in bad:
+            fn = ingest.SOURCES.get(name)
+            scfg = dict((cfg.get("sources") or {}).get(name) or {})
+            if not fn or not scfg.get("enabled", False):
+                continue
+            try:
+                got = fn(scfg)
+                lines.append(f"✅ {name}: recovered — {len(got)} items just now")
+            except Exception as exc:  # noqa: BLE001
+                lines.append(f"❌ {name}: {type(exc).__name__}: {str(exc)[:400]}")
+        for n in keyless:
+            lines.append(f"⏸ {n}: no key entered — waiting, not broken")
+        if not lines:
+            lines = ["All sources healthy — nothing to probe."]
+        return "\n".join(lines)
+
     def scan(self) -> dict:
         cfg = self._apply_planner_and_pacing()
         now = dt.datetime.now(dt.timezone.utc)
@@ -103,7 +134,21 @@ class Pipeline:
             dbm.kv_set(self.con, k, (dbm.kv_get(self.con, k) or 0) + got)
         for j in jobs:
             dbm.upsert_opportunity(self.con, j)
-        survivors = funnel.hard_constraints(self.con, jobs, cfg, now)
+        evaled = {r["opp_key"]: r["ts"] for r in self.con.execute(
+            "SELECT opp_key, MAX(ts) ts FROM flight WHERE stage='deep_eval' "
+            "GROUP BY opp_key")}
+        fresh = []
+        for j in jobs:
+            t = evaled.get(j.key)
+            row = self.con.execute("SELECT last_signal, status FROM opportunities "
+                                   "WHERE key=?", (j.key,)).fetchone()
+            if row and row["status"] == "delivered":
+                continue
+            if t and (not row or (row["last_signal"] or 0) <= t):
+                continue  # already evaluated, nothing new since
+            fresh.append(j)
+        LOG.info("%d fetched, %d new-or-resignaled", len(jobs), len(fresh))
+        survivors = funnel.hard_constraints(self.con, fresh, cfg, now)
         kept = funnel.triage(self.con, survivors, cfg)
         screened = funnel.screen(self.con, kept, cfg)
         evaluated = funnel.deep_eval(self.con, screened, cfg)
@@ -160,17 +205,17 @@ class Pipeline:
                      location=r["location"] or "", salary=r["salary"] or "")
             evaluated.append({"job": j, "score": r["s"], "dims": det.get("dims") or {},
                               "verdict": det.get("verdict") or "WATCH",
-                              "blurb": (r["description"] or r["title"])[:200],
-                              "risk": ""})
+                              "blurb": det.get("blurb") or _trim(r["description"] or r["title"]),
+                              "risk": det.get("risk") or ""})
         bar_delta = dbm.kv_get(self.con, "bar_delta") or 0
         funnel.BAR = 80.0 + bar_delta
-        picked, near = funnel.select_daily(self.con, evaluated, time.time())
+        picked, below = funnel.select_daily(self.con, evaluated, time.time())
         self.con.commit()
         scanned = self.con.execute("SELECT COUNT(*) c FROM flight WHERE stage='triage' "
                                    "AND ts>?", (cutoff,)).fetchone()["c"]
         health = {"failed": [r["name"] for r in self.con.execute(
             "SELECT name FROM sources WHERE fail_streak>=2")]}
-        return picked, near, {"scanned": scanned, "health": health}
+        return picked, below, {"scanned": scanned, "health": health}
 
     # ------------------------------------------------------------ sunday
     def sunday_brief(self) -> dict:
@@ -209,13 +254,15 @@ async def run():
         while True:
             now = dt.datetime.now(NY)
             try:
-                if time.time() - last_scan > SCAN_EVERY_H * 3600:
+                if time.time() - last_scan > SCAN_EVERY_H * 3600 \
+                        and not bot.scan_lock.locked():
                     last_scan = time.time()
-                    await pipe.scan_and_maybe_flash(bot)
+                    async with bot.scan_lock:
+                        await pipe.scan_and_maybe_flash(bot)
                 today = now.date().isoformat()
                 if now.hour == 7 and dbm.kv_get(con, "dropped") != today:
-                    picked, near, stats = pipe.select_daily()
-                    await bot.send_daily(picked, near, stats)
+                    picked, below, stats = pipe.select_daily()
+                    await bot.send_daily(picked, below, stats)
                     dbm.kv_set(con, "dropped", today); con.commit()
                     ping = os.environ.get("HEALTHCHECK_PING_URL")
                     if ping:
@@ -241,7 +288,19 @@ async def run():
     async with bot.app:
         await bot.app.updater.start_polling()
         await bot.app.start()
-        LOG.info("bot polling; pipeline loop running")
+        LOG.info("bot polling; pipeline loop running (v%s)", VERSION)
+        chat = dbm.kv_get(con, "chat_id")
+        if chat and dbm.kv_get(con, "code_version") != VERSION:
+            try:
+                await bot.app.bot.send_message(
+                    chat, f"⬆ Updated to v{VERSION}: drops now always deliver the "
+                          "day's best (below-bar items labeled with scores) · fairer "
+                          "scoring on missing info · TheirStack + JSearch rebuilt from "
+                          "official docs · commands no longer queue behind scans.")
+            except Exception:  # noqa: BLE001
+                pass
+            dbm.kv_set(con, "code_version", VERSION)
+            con.commit()
         await loop()
 
 

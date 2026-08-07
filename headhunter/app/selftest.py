@@ -24,9 +24,10 @@ def main() -> int:
     for r in ev[:2]:
         r["score"] = 90.0
         dbm.record(con, r["job"].key, "deep_eval", 90.0, {"dims": {"fit": 92}})
-    picked, near = funnel.select_daily(con, ev, time.time())
+    picked, below = funnel.select_daily(con, ev, time.time())
     assert picked and all(p["final"] >= funnel.BAR for p in picked)
-    assert near is not None
+    assert below, "below-bar tier must fill when fewer than 10 clear"
+    assert all(b["final"] < funnel.BAR for b in below)
     card = _card_text(1, picked[0])
     assert picked[0]["job"].title in card
     con.execute("INSERT INTO verdicts(opp_key,ts,verdict,note) VALUES(?,?,?,?)",

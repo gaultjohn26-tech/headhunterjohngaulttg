@@ -2,6 +2,7 @@
 verdicts, forward-anything regret intake, /why, Sunday brief, canaries."""
 from __future__ import annotations
 
+import asyncio
 import html
 import json
 import logging
@@ -14,6 +15,7 @@ from telegram.constants import ParseMode
 from telegram.ext import (Application, CallbackQueryHandler, CommandHandler,
                           ContextTypes, MessageHandler, filters)
 
+from . import VERSION
 from . import db as dbm
 from . import regret as regret_mod
 
@@ -24,10 +26,11 @@ HIDE_REASONS = [("too_junior", "Too junior"), ("too_sales", "Too sales-heavy"),
                 ("low_upside", "Not enough upside"), ("never_co", "Never this company")]
 
 
-def _card_text(i: int, rec: dict) -> str:
+def _card_text(i: int, rec: dict, show_score: bool = False) -> str:
     j = rec["job"]
     esc = html.escape
-    head = f"<b>{i}. {rec['verdict']}</b> — {esc(j.title)}, {esc(j.company)}"
+    score = f" · {rec.get('final', rec.get('score', 0)):.0f}" if show_score else ""
+    head = f"<b>{i}. {rec['verdict']}{score}</b> — {esc(j.title)}, {esc(j.company)}"
     meta = " · ".join(x for x in (j.location, j.salary) if x)
     risk = f"\n<i>Risk: {esc(rec['risk'])}</i>" if rec.get("risk") else ""
     return f"{head}\n{esc(rec['blurb'])}\n{esc(meta)}{risk}"
@@ -56,12 +59,14 @@ class Bot:
     def __init__(self, con, cfg, pipeline):
         self.con, self.cfg, self.pipeline = con, cfg, pipeline
         token = os.environ["TELEGRAM_BOT_TOKEN"]
-        self.app = Application.builder().token(token).build()
+        self.scan_lock = asyncio.Lock()
+        self.app = Application.builder().token(token).concurrent_updates(True).build()
         self.app.add_handler(CommandHandler("start", self.on_start))
         self.app.add_handler(CommandHandler("why", self.on_why))
         self.app.add_handler(CommandHandler("status", self.on_status))
         self.app.add_handler(CommandHandler("scan", self.on_scan))
         self.app.add_handler(CommandHandler("drop", self.on_drop))
+        self.app.add_handler(CommandHandler("debug", self.on_debug))
         self.app.add_handler(CallbackQueryHandler(self.on_button))
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_text))
 
@@ -79,7 +84,7 @@ class Bot:
         return dbm.kv_get(self.con, "chat_id")
 
     # ------------------------------------------------------------ daily drop
-    async def send_daily(self, picked: list[dict], near: dict | None, stats: dict):
+    async def send_daily(self, picked: list[dict], below: list | None, stats: dict):
         chat = await self.chat_id()
         if not chat:
             return
@@ -96,12 +101,19 @@ class Bot:
                 disable_web_page_preview=True)
             await self.app.bot.send_message(chat, rec["job"].url,
                                             disable_web_page_preview=True)
-        if near and len(picked) < 10:
+        if below:
             await self.app.bot.send_message(
-                chat, f"─────\nHeld back: <b>{html.escape(near['job'].title)}</b>, "
-                      f"{html.escape(near['job'].company)} — scored {near['final']:.0f} "
-                      f"vs the {int(80)} bar. {html.escape(near.get('risk') or near['blurb'])}",
-                parse_mode=ParseMode.HTML)
+                chat, "── Below the bar — best of the rest. Scores shown; "
+                      "your taps teach the ranker. ──")
+            for n, rec in enumerate(below, len(picked) + 1):
+                self.con.execute("UPDATE opportunities SET decision=? WHERE key=?",
+                                 (rec["verdict"], rec["job"].key))
+                await self.app.bot.send_message(
+                    chat, _card_text(n, rec, show_score=True), parse_mode=ParseMode.HTML,
+                    reply_markup=_card_kb(rec["job"].key),
+                    disable_web_page_preview=True)
+                await self.app.bot.send_message(chat, rec["job"].url,
+                                                disable_web_page_preview=True)
         health = stats.get("health") or {}
         if health.get("failed"):
             await self.app.bot.send_message(
@@ -169,6 +181,13 @@ class Bot:
         await update.message.reply_text(regret_mod.regret_card(pm))
 
     # ------------------------------------------------------------ commands
+    async def on_debug(self, update: Update, _):
+        await update.message.reply_text("Probing sources — errors will appear here, "
+                                        "in the API's own words…")
+        report = await asyncio.to_thread(self.pipeline.debug_sources)
+        for i in range(0, len(report), 3500):
+            await update.message.reply_text(report[i:i + 3500])
+
     async def on_why(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         n = int(ctx.args[0]) if ctx.args else 1
         rows = self.con.execute(
@@ -191,23 +210,29 @@ class Bot:
         n_opp = self.con.execute("SELECT COUNT(*) c FROM opportunities").fetchone()["c"]
         await update.message.reply_text(
             f"{n_opp:,} opportunities tracked · {live}/{len(srcs)} sources healthy"
-            + (f" · degraded: {', '.join(bad)}" if bad else ""))
+            + (f" · degraded: {', '.join(bad)}" if bad else "")
+            + f" · v{VERSION}")
 
     async def on_scan(self, update: Update, _):
-        await update.message.reply_text("Manual scan started…")
-        stats = await self.pipeline.scan_and_maybe_flash(self)
+        if self.scan_lock.locked():
+            await update.message.reply_text(
+                "A scan is already running — its report will land here shortly.")
+            return
+        async with self.scan_lock:
+            await update.message.reply_text("Manual scan started…")
+            stats = await self.pipeline.scan_and_maybe_flash(self)
         await update.message.reply_text(
             f"Scan done: {stats.get('scanned', 0)} items, "
             f"{stats.get('flashed', 0)} exceptional flash(es) sent.")
 
     async def on_drop(self, update: Update, _):
         await update.message.reply_text("Building a drop from the last 24h of evaluations…")
-        picked, near, stats = self.pipeline.select_daily()
-        if not picked and not near:
+        picked, below, stats = self.pipeline.select_daily()
+        if not picked and not below:
             await update.message.reply_text(
                 "Nothing evaluated in the last 24h yet — send /scan first, then /drop.")
             return
-        await self.send_daily(picked, near, stats)
+        await self.send_daily(picked, below, stats)
 
     # ------------------------------------------------------------ Sunday brief
     async def send_sunday(self, brief: dict):

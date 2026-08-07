@@ -211,7 +211,12 @@ def deep_eval(con, jobs, cfg) -> list[dict]:
               '"blurb":"<=200 chars, verb-first, why it is top-decile or not",'
               '"risk":"<=90 chars"}]\n'
               "Prestige counts only when paired with autonomy (conditional). "
-              "Meeting-heavy or quota patterns cap the score at 60.\n\n" + listing)
+              "Calibration: missing information is NEUTRAL — never deduct for "
+              "unlisted salary, unstated culture, or unknown meeting load; score "
+              "expected value from what IS stated and put uncertainty in risk. "
+              "A strong-fit role at a strong company with typical unknowns "
+              "belongs in the 80s. Only positive evidence of meeting-heavy or "
+              "quota patterns caps the score at 60.\n\n" + listing)
         try:
             txt = _claude(model, prompt, 3500)
             arr = json.loads(txt[txt.find("["):txt.rfind("]") + 1])
@@ -228,7 +233,8 @@ def deep_eval(con, jobs, cfg) -> list[dict]:
                    "risk": (d.get("risk") or "")[:100]}
             out.append(rec)
             dbm.record(con, j.key, "deep_eval", score,
-                       {"dims": rec["dims"], "verdict": rec["verdict"]})
+                       {"dims": rec["dims"], "verdict": rec["verdict"],
+                        "blurb": rec["blurb"], "risk": rec["risk"]})
             con.execute("UPDATE opportunities SET best_score=MAX(best_score,?) WHERE key=?",
                         (score, j.key))
     return out
@@ -242,6 +248,7 @@ def confidence_adjust(con, rec, now_ts: float) -> float:
     if row:
         anchor = row["last_signal"] or row["posted_at"] or now_ts
         age_d = max(0.0, (now_ts - anchor) / 86400.0)
+        age_d = max(0.0, age_d - 2.0)  # 48h grace before any decay
         half = SIGNAL_HALF_LIFE_D if "signal" in rec["job"].source else POSTING_HALF_LIFE_D
         score *= 0.5 ** (age_d / half) if age_d > half else 1.0 - 0.35 * (age_d / half)
         n_sig = dbm.distinct_signal_count(row["signal_log"])
@@ -255,9 +262,10 @@ def select_daily(con, evaluated: list[dict], now_ts: float) -> tuple[list[dict],
         r["final"] = confidence_adjust(con, r, now_ts)
     ranked = sorted(evaluated, key=lambda r: r["final"], reverse=True)
     picked = [r for r in ranked if r["final"] >= BAR][:DAILY_N]
-    near = next((r for r in ranked if r not in picked), None)
-    for r in picked:
+    rest = [r for r in ranked if r not in picked]
+    below = rest[: max(0, min(5, DAILY_N - len(picked)))]
+    for r in picked + below:
         dbm.record(con, r["job"].key, "delivered", r["final"])
         con.execute("UPDATE opportunities SET status='delivered', delivered_at=? WHERE key=?",
                     (now_ts, r["job"].key))
-    return picked, near
+    return picked, below

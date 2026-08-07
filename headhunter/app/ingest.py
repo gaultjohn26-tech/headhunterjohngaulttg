@@ -312,10 +312,14 @@ def fetch_hackernews(scfg: dict) -> list[Job]:
 def fetch_greenhouse(scfg: dict) -> list[Job]:
     out: list[Job] = []
     for slug in scfg.get("companies") or []:
-        data = http_get_json(
-            f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs",
-            params={"content": "true"},
-        )
+        try:
+            data = http_get_json(
+                f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs",
+                params={"content": "true"},
+            )
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("greenhouse:%s skipped: %s", slug, exc)
+            continue
         for j in data.get("jobs") or []:
             out.append(
                 Job(
@@ -335,9 +339,13 @@ def fetch_greenhouse(scfg: dict) -> list[Job]:
 def fetch_lever(scfg: dict) -> list[Job]:
     out: list[Job] = []
     for slug in scfg.get("companies") or []:
-        data = http_get_json(
-            f"https://api.lever.co/v0/postings/{slug}", params={"mode": "json"}
-        )
+        try:
+            data = http_get_json(
+                f"https://api.lever.co/v0/postings/{slug}", params={"mode": "json"}
+            )
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("lever:%s skipped: %s", slug, exc)
+            continue
         for j in data if isinstance(data, list) else []:
             cats = j.get("categories") or {}
             out.append(
@@ -441,25 +449,40 @@ def fetch_jsearch(scfg: dict) -> list[Job]:
         LOG.info("jsearch      skipped (no OPENWEBNINJA_KEY / RAPIDAPI_KEY)")
         return []
     if own_key:
-        endpoint = "https://api.openwebninja.com/jsearch/search"
+        endpoints = ["https://api.openwebninja.com/jsearch/search-v2",
+                     "https://api.openwebninja.com/jsearch/search"]
         auth_headers = {"x-api-key": own_key}
     else:
-        endpoint = "https://jsearch.p.rapidapi.com/search"
+        endpoints = ["https://jsearch.p.rapidapi.com/search"]
         auth_headers = {"X-RapidAPI-Key": rapid_key,
                         "X-RapidAPI-Host": "jsearch.p.rapidapi.com"}
     out: list[Job] = []
     budget = int(scfg.get("daily_request_budget") or 999)
     for q in (scfg.get("searches") or [])[:budget]:
-        data = http_get_json_extra(
-            endpoint,
-            params={
-                "query": q, "page": 1, "num_pages": int(scfg.get("pages") or 1),
-                "date_posted": scfg.get("date_posted") or "3days",
-                "remote_jobs_only": "true",
-            },
-            headers=auth_headers,
-        )
+        params = {"query": q, "date_posted": scfg.get("date_posted") or "3days"}
+        if own_key:
+            params["work_from_home"] = "true"   # documented remote filter (direct API)
+        else:
+            params.update({"page": 1, "num_pages": int(scfg.get("pages") or 1),
+                           "remote_jobs_only": "true"})
+        data, last_exc = None, None
+        for ep in list(endpoints):
+            try:
+                cand = http_get_json_extra(ep, params=params, headers=auth_headers)
+                rows_chk = cand.get("data") if isinstance(cand, dict) else None
+                if not isinstance(rows_chk, list):
+                    raise ValueError(f"unexpected reply from {ep}: {str(cand)[:200]}")
+                data = cand
+                if ep != endpoints[0]:
+                    endpoints.remove(ep); endpoints.insert(0, ep)  # remember winner
+                break
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+        if data is None:
+            raise last_exc
         for j in data.get("data") or []:
+            if not isinstance(j, dict):
+                continue
             city = j.get("job_city") or ""
             country = j.get("job_country") or ""
             loc = ", ".join(x for x in (city, country) if x)
@@ -545,7 +568,11 @@ def _find_job_dicts(data) -> list[dict]:
 def fetch_ashby(scfg: dict) -> list[Job]:
     out: list[Job] = []
     for slug in scfg.get("companies") or []:
-        data = http_get_json(f"https://api.ashbyhq.com/posting-api/job-board/{slug}")
+        try:
+            data = http_get_json(f"https://api.ashbyhq.com/posting-api/job-board/{slug}")
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("ashby:%s skipped: %s", slug, exc)
+            continue
         for j in data.get("jobs") or []:
             if j.get("isListed") is False:
                 continue
@@ -572,10 +599,14 @@ def fetch_ashby(scfg: dict) -> list[Job]:
 def fetch_workable(scfg: dict) -> list[Job]:
     out: list[Job] = []
     for slug in scfg.get("companies") or []:
-        data = http_get_json(
-            f"https://apply.workable.com/api/v1/widget/accounts/{slug}",
-            params={"details": "true"},
-        )
+        try:
+            data = http_get_json(
+                f"https://apply.workable.com/api/v1/widget/accounts/{slug}",
+                params={"details": "true"},
+            )
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("workable:%s skipped: %s", slug, exc)
+            continue
         for j in data.get("jobs") or []:
             loc = j.get("location") or {}
             loc_s = ", ".join(
@@ -601,10 +632,14 @@ def fetch_workable(scfg: dict) -> list[Job]:
 def fetch_smartrecruiters(scfg: dict) -> list[Job]:
     out: list[Job] = []
     for slug in scfg.get("companies") or []:
-        data = http_get_json(
-            f"https://api.smartrecruiters.com/v1/companies/{slug}/postings",
-            params={"limit": 100},
-        )
+        try:
+            data = http_get_json(
+                f"https://api.smartrecruiters.com/v1/companies/{slug}/postings",
+                params={"limit": 100},
+            )
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("smartrecruiters:%s skipped: %s", slug, exc)
+            continue
         for j in data.get("content") or []:
             loc = j.get("location") or {}
             loc_s = ", ".join(
@@ -630,7 +665,11 @@ def fetch_smartrecruiters(scfg: dict) -> list[Job]:
 def fetch_recruitee(scfg: dict) -> list[Job]:
     out: list[Job] = []
     for slug in scfg.get("companies") or []:
-        data = http_get_json(f"https://{slug}.recruitee.com/api/offers/")
+        try:
+            data = http_get_json(f"https://{slug}.recruitee.com/api/offers/")
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("recruitee:%s skipped: %s", slug, exc)
+            continue
         for j in data.get("offers") or []:
             out.append(
                 Job(
@@ -684,13 +723,17 @@ def fetch_workday(scfg: dict) -> list[Job]:
         tenant, host, site = m.groups()
         api = f"https://{tenant}.{host}.myworkdayjobs.com/wday/cxs/{tenant}/{site}/jobs"
         for offset in (0, 20, 40):
-            resp = requests.post(
-                api, json={"limit": 20, "offset": offset, "searchText": ""},
-                timeout=30, headers={"User-Agent": USER_AGENT,
-                                     "Accept": "application/json",
-                                     "Content-Type": "application/json"},
-            )
-            resp.raise_for_status()
+            try:
+                resp = requests.post(
+                    api, json={"limit": 20, "offset": offset, "searchText": ""},
+                    timeout=30, headers={"User-Agent": USER_AGENT,
+                                         "Accept": "application/json",
+                                         "Content-Type": "application/json"},
+                )
+                resp.raise_for_status()
+            except Exception as exc:  # noqa: BLE001
+                LOG.warning("workday:%s skipped: %s", tenant, exc)
+                break
             postings = resp.json().get("jobPostings") or []
             for j in postings:
                 path = j.get("externalPath") or ""
@@ -732,11 +775,18 @@ def fetch_rss(scfg: dict) -> list[Job]:
         name, url = feed.get("name") or "rss", feed.get("url") or ""
         if not url:
             continue
-        resp = requests.get(url, timeout=30, headers={"User-Agent": USER_AGENT})
-        resp.raise_for_status()
-        # strip namespaces so RSS2 and Atom parse with the same tag names
-        xml_text = re.sub(r'\sxmlns(:\w+)?="[^"]+"', "", resp.text, count=10)
-        root = ET.fromstring(xml_text)
+        try:
+            resp = requests.get(url, timeout=30, headers={
+                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                              "(KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+                "Accept": "application/rss+xml, application/xml;q=0.9, */*;q=0.8"})
+            resp.raise_for_status()
+            # strip namespaces so RSS2 and Atom parse with the same tag names
+            xml_text = re.sub(r'\sxmlns(:\w+)?="[^"]+"', "", resp.text, count=10)
+            root = ET.fromstring(xml_text)
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("rss:%s skipped (fetch or parse): %s", name, exc)
+            continue
         items = root.findall(".//item") or root.findall(".//entry")
         for it in items:
             title = _rss_text(it, "title")
@@ -906,7 +956,11 @@ def resolve_watchlist(cfg: dict) -> int:
 def fetch_bamboohr(scfg: dict) -> list[Job]:
     out: list[Job] = []
     for slug in scfg.get("companies") or []:
-        data = http_get_json(f"https://{slug}.bamboohr.com/careers/list")
+        try:
+            data = http_get_json(f"https://{slug}.bamboohr.com/careers/list")
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("bamboohr:%s skipped: %s", slug, exc)
+            continue
         for j in data.get("result") or []:
             loc = j.get("location") or {}
             loc_s = ", ".join(x for x in (loc.get("city"), loc.get("state")) if x) \
@@ -938,7 +992,11 @@ def _pp_attr(j: dict, *keys):
 def fetch_pinpoint(scfg: dict) -> list[Job]:
     out: list[Job] = []
     for slug in scfg.get("companies") or []:
-        data = http_get_json(f"https://{slug}.pinpointhq.com/postings.json")
+        try:
+            data = http_get_json(f"https://{slug}.pinpointhq.com/postings.json")
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("pinpoint:%s skipped: %s", slug, exc)
+            continue
         rows = data.get("data") if isinstance(data, dict) else data
         for j in rows or []:
             loc = _pp_attr(j, "location", "workplace-type", "workplace_type")
@@ -976,15 +1034,15 @@ def fetch_theirstack(scfg: dict) -> list[Job]:
     if not key:
         LOG.info("theirstack   skipped (no THEIRSTACK_API_KEY)")
         return []
-    body = {
+    body = {  # documented fields only: theirstack.com/en/docs/api-reference
         "page": 0,
         "limit": int(scfg.get("daily_record_limit") or 100),
         "posted_at_max_age_days": int(scfg.get("max_age_days") or 1),
-        "order_by": [{"field": "date_posted", "desc": True}],
-        "remote": True,
+        "order_by": [{"desc": True, "field": "date_posted"},
+                     {"desc": True, "field": "discovered_at"}],
     }
     if scfg.get("title_patterns"):
-        body["job_title_pattern_or"] = scfg["title_patterns"]
+        body["job_title_or"] = scfg["title_patterns"]
     resp = requests.post(
         "https://api.theirstack.com/v1/jobs/search",
         json=body, timeout=45,
@@ -992,6 +1050,8 @@ def fetch_theirstack(scfg: dict) -> list[Job]:
                  "Content-Type": "application/json",
                  "User-Agent": USER_AGENT},
     )
+    if not resp.ok:
+        LOG.warning("theirstack HTTP %s: %s", resp.status_code, resp.text[:300])
     resp.raise_for_status()
     payload = resp.json()
     rows = payload.get("data") or payload.get("jobs") or []
