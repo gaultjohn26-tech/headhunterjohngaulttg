@@ -449,8 +449,8 @@ def fetch_jsearch(scfg: dict) -> list[Job]:
         LOG.info("jsearch      skipped (no OPENWEBNINJA_KEY / RAPIDAPI_KEY)")
         return []
     if own_key:
-        endpoints = ["https://api.openwebninja.com/jsearch/search",
-                     "https://api.openwebninja.com/jsearch/search-v2"]
+        endpoints = ["https://api.openwebninja.com/jsearch/search-v2",
+                     "https://api.openwebninja.com/jsearch/search"]
         auth_headers = {"x-api-key": own_key}
     else:
         endpoints = ["https://jsearch.p.rapidapi.com/search"]
@@ -459,18 +459,16 @@ def fetch_jsearch(scfg: dict) -> list[Job]:
     out: list[Job] = []
     budget = int(scfg.get("daily_request_budget") or 999)
     for q in (scfg.get("searches") or [])[:budget]:
+        params = {"query": q, "date_posted": scfg.get("date_posted") or "3days"}
+        if own_key:
+            params["work_from_home"] = "true"   # documented remote filter (direct API)
+        else:
+            params.update({"page": 1, "num_pages": int(scfg.get("pages") or 1),
+                           "remote_jobs_only": "true"})
         data, last_exc = None, None
         for ep in list(endpoints):
             try:
-                cand = http_get_json_extra(
-                    ep,
-                    params={
-                        "query": q, "page": 1, "num_pages": int(scfg.get("pages") or 1),
-                        "date_posted": scfg.get("date_posted") or "3days",
-                        "remote_jobs_only": "true",
-                    },
-                    headers=auth_headers,
-                )
+                cand = http_get_json_extra(ep, params=params, headers=auth_headers)
                 rows_chk = cand.get("data") if isinstance(cand, dict) else None
                 if not isinstance(rows_chk, list):
                     raise ValueError(f"unexpected reply from {ep}: {str(cand)[:200]}")
@@ -778,14 +776,17 @@ def fetch_rss(scfg: dict) -> list[Job]:
         if not url:
             continue
         try:
-            resp = requests.get(url, timeout=30, headers={"User-Agent": USER_AGENT})
+            resp = requests.get(url, timeout=30, headers={
+                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                              "(KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+                "Accept": "application/rss+xml, application/xml;q=0.9, */*;q=0.8"})
             resp.raise_for_status()
+            # strip namespaces so RSS2 and Atom parse with the same tag names
+            xml_text = re.sub(r'\sxmlns(:\w+)?="[^"]+"', "", resp.text, count=10)
+            root = ET.fromstring(xml_text)
         except Exception as exc:  # noqa: BLE001
-            LOG.warning("rss:%s skipped: %s", name, exc)
+            LOG.warning("rss:%s skipped (fetch or parse): %s", name, exc)
             continue
-        # strip namespaces so RSS2 and Atom parse with the same tag names
-        xml_text = re.sub(r'\sxmlns(:\w+)?="[^"]+"', "", resp.text, count=10)
-        root = ET.fromstring(xml_text)
         items = root.findall(".//item") or root.findall(".//entry")
         for it in items:
             title = _rss_text(it, "title")
@@ -1033,15 +1034,15 @@ def fetch_theirstack(scfg: dict) -> list[Job]:
     if not key:
         LOG.info("theirstack   skipped (no THEIRSTACK_API_KEY)")
         return []
-    body = {
+    body = {  # documented fields only: theirstack.com/en/docs/api-reference
         "page": 0,
         "limit": int(scfg.get("daily_record_limit") or 100),
         "posted_at_max_age_days": int(scfg.get("max_age_days") or 1),
-        "order_by": [{"field": "date_posted", "desc": True}],
-        "remote": True,
+        "order_by": [{"desc": True, "field": "date_posted"},
+                     {"desc": True, "field": "discovered_at"}],
     }
     if scfg.get("title_patterns"):
-        body["job_title_pattern_or"] = scfg["title_patterns"]
+        body["job_title_or"] = scfg["title_patterns"]
     resp = requests.post(
         "https://api.theirstack.com/v1/jobs/search",
         json=body, timeout=45,

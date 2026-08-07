@@ -211,7 +211,12 @@ def deep_eval(con, jobs, cfg) -> list[dict]:
               '"blurb":"<=200 chars, verb-first, why it is top-decile or not",'
               '"risk":"<=90 chars"}]\n'
               "Prestige counts only when paired with autonomy (conditional). "
-              "Meeting-heavy or quota patterns cap the score at 60.\n\n" + listing)
+              "Calibration: missing information is NEUTRAL — never deduct for "
+              "unlisted salary, unstated culture, or unknown meeting load; score "
+              "expected value from what IS stated and put uncertainty in risk. "
+              "A strong-fit role at a strong company with typical unknowns "
+              "belongs in the 80s. Only positive evidence of meeting-heavy or "
+              "quota patterns caps the score at 60.\n\n" + listing)
         try:
             txt = _claude(model, prompt, 3500)
             arr = json.loads(txt[txt.find("["):txt.rfind("]") + 1])
@@ -257,9 +262,10 @@ def select_daily(con, evaluated: list[dict], now_ts: float) -> tuple[list[dict],
         r["final"] = confidence_adjust(con, r, now_ts)
     ranked = sorted(evaluated, key=lambda r: r["final"], reverse=True)
     picked = [r for r in ranked if r["final"] >= BAR][:DAILY_N]
-    near = next((r for r in ranked if r not in picked), None)
-    for r in picked:
+    rest = [r for r in ranked if r not in picked]
+    below = rest[: max(0, min(5, DAILY_N - len(picked)))]
+    for r in picked + below:
         dbm.record(con, r["job"].key, "delivered", r["final"])
         con.execute("UPDATE opportunities SET status='delivered', delivered_at=? WHERE key=?",
                     (now_ts, r["job"].key))
-    return picked, near
+    return picked, below

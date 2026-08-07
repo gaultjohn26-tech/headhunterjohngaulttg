@@ -209,13 +209,13 @@ class Pipeline:
                               "risk": det.get("risk") or ""})
         bar_delta = dbm.kv_get(self.con, "bar_delta") or 0
         funnel.BAR = 80.0 + bar_delta
-        picked, near = funnel.select_daily(self.con, evaluated, time.time())
+        picked, below = funnel.select_daily(self.con, evaluated, time.time())
         self.con.commit()
         scanned = self.con.execute("SELECT COUNT(*) c FROM flight WHERE stage='triage' "
                                    "AND ts>?", (cutoff,)).fetchone()["c"]
         health = {"failed": [r["name"] for r in self.con.execute(
             "SELECT name FROM sources WHERE fail_streak>=2")]}
-        return picked, near, {"scanned": scanned, "health": health}
+        return picked, below, {"scanned": scanned, "health": health}
 
     # ------------------------------------------------------------ sunday
     def sunday_brief(self) -> dict:
@@ -254,13 +254,15 @@ async def run():
         while True:
             now = dt.datetime.now(NY)
             try:
-                if time.time() - last_scan > SCAN_EVERY_H * 3600:
+                if time.time() - last_scan > SCAN_EVERY_H * 3600 \
+                        and not bot.scan_lock.locked():
                     last_scan = time.time()
-                    await pipe.scan_and_maybe_flash(bot)
+                    async with bot.scan_lock:
+                        await pipe.scan_and_maybe_flash(bot)
                 today = now.date().isoformat()
                 if now.hour == 7 and dbm.kv_get(con, "dropped") != today:
-                    picked, near, stats = pipe.select_daily()
-                    await bot.send_daily(picked, near, stats)
+                    picked, below, stats = pipe.select_daily()
+                    await bot.send_daily(picked, below, stats)
                     dbm.kv_set(con, "dropped", today); con.commit()
                     ping = os.environ.get("HEALTHCHECK_PING_URL")
                     if ping:
@@ -291,8 +293,10 @@ async def run():
         if chat and dbm.kv_get(con, "code_version") != VERSION:
             try:
                 await bot.app.bot.send_message(
-                    chat, f"⬆ Updated to v{VERSION}. New: /debug sends any source's "
-                          "real error straight here — the terminal era is over.")
+                    chat, f"⬆ Updated to v{VERSION}: drops now always deliver the "
+                          "day's best (below-bar items labeled with scores) · fairer "
+                          "scoring on missing info · TheirStack + JSearch rebuilt from "
+                          "official docs · commands no longer queue behind scans.")
             except Exception:  # noqa: BLE001
                 pass
             dbm.kv_set(con, "code_version", VERSION)

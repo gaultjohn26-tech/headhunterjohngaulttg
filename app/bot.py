@@ -26,10 +26,11 @@ HIDE_REASONS = [("too_junior", "Too junior"), ("too_sales", "Too sales-heavy"),
                 ("low_upside", "Not enough upside"), ("never_co", "Never this company")]
 
 
-def _card_text(i: int, rec: dict) -> str:
+def _card_text(i: int, rec: dict, show_score: bool = False) -> str:
     j = rec["job"]
     esc = html.escape
-    head = f"<b>{i}. {rec['verdict']}</b> — {esc(j.title)}, {esc(j.company)}"
+    score = f" · {rec.get('final', rec.get('score', 0)):.0f}" if show_score else ""
+    head = f"<b>{i}. {rec['verdict']}{score}</b> — {esc(j.title)}, {esc(j.company)}"
     meta = " · ".join(x for x in (j.location, j.salary) if x)
     risk = f"\n<i>Risk: {esc(rec['risk'])}</i>" if rec.get("risk") else ""
     return f"{head}\n{esc(rec['blurb'])}\n{esc(meta)}{risk}"
@@ -58,7 +59,8 @@ class Bot:
     def __init__(self, con, cfg, pipeline):
         self.con, self.cfg, self.pipeline = con, cfg, pipeline
         token = os.environ["TELEGRAM_BOT_TOKEN"]
-        self.app = Application.builder().token(token).build()
+        self.scan_lock = asyncio.Lock()
+        self.app = Application.builder().token(token).concurrent_updates(True).build()
         self.app.add_handler(CommandHandler("start", self.on_start))
         self.app.add_handler(CommandHandler("why", self.on_why))
         self.app.add_handler(CommandHandler("status", self.on_status))
@@ -82,7 +84,7 @@ class Bot:
         return dbm.kv_get(self.con, "chat_id")
 
     # ------------------------------------------------------------ daily drop
-    async def send_daily(self, picked: list[dict], near: dict | None, stats: dict):
+    async def send_daily(self, picked: list[dict], below: list | None, stats: dict):
         chat = await self.chat_id()
         if not chat:
             return
@@ -99,12 +101,19 @@ class Bot:
                 disable_web_page_preview=True)
             await self.app.bot.send_message(chat, rec["job"].url,
                                             disable_web_page_preview=True)
-        if near and len(picked) < 10:
+        if below:
             await self.app.bot.send_message(
-                chat, f"─────\nHeld back: <b>{html.escape(near['job'].title)}</b>, "
-                      f"{html.escape(near['job'].company)} — scored {near['final']:.0f} "
-                      f"vs the {int(80)} bar. {html.escape(near.get('risk') or near['blurb'])}",
-                parse_mode=ParseMode.HTML)
+                chat, "── Below the bar — best of the rest. Scores shown; "
+                      "your taps teach the ranker. ──")
+            for n, rec in enumerate(below, len(picked) + 1):
+                self.con.execute("UPDATE opportunities SET decision=? WHERE key=?",
+                                 (rec["verdict"], rec["job"].key))
+                await self.app.bot.send_message(
+                    chat, _card_text(n, rec, show_score=True), parse_mode=ParseMode.HTML,
+                    reply_markup=_card_kb(rec["job"].key),
+                    disable_web_page_preview=True)
+                await self.app.bot.send_message(chat, rec["job"].url,
+                                                disable_web_page_preview=True)
         health = stats.get("health") or {}
         if health.get("failed"):
             await self.app.bot.send_message(
@@ -205,20 +214,25 @@ class Bot:
             + f" · v{VERSION}")
 
     async def on_scan(self, update: Update, _):
-        await update.message.reply_text("Manual scan started…")
-        stats = await self.pipeline.scan_and_maybe_flash(self)
+        if self.scan_lock.locked():
+            await update.message.reply_text(
+                "A scan is already running — its report will land here shortly.")
+            return
+        async with self.scan_lock:
+            await update.message.reply_text("Manual scan started…")
+            stats = await self.pipeline.scan_and_maybe_flash(self)
         await update.message.reply_text(
             f"Scan done: {stats.get('scanned', 0)} items, "
             f"{stats.get('flashed', 0)} exceptional flash(es) sent.")
 
     async def on_drop(self, update: Update, _):
         await update.message.reply_text("Building a drop from the last 24h of evaluations…")
-        picked, near, stats = self.pipeline.select_daily()
-        if not picked and not near:
+        picked, below, stats = self.pipeline.select_daily()
+        if not picked and not below:
             await update.message.reply_text(
                 "Nothing evaluated in the last 24h yet — send /scan first, then /drop.")
             return
-        await self.send_daily(picked, near, stats)
+        await self.send_daily(picked, below, stats)
 
     # ------------------------------------------------------------ Sunday brief
     async def send_sunday(self, brief: dict):
