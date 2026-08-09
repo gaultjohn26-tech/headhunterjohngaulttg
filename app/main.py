@@ -347,23 +347,31 @@ async def run():
         if chat and dbm.kv_get(con, "code_version") != VERSION:
             try:
                 await bot.app.bot.send_message(
-                    chat, f"⬆ Updated to v{VERSION}: TheirStack diagnostic ladder (probes their "
-                          "own documented shapes; failures push their reason to you "
-                          "automatically) · 🔴/🟢 source alerts on any coverage change "
-                          "· coverage banner atop partial drops · plus all of v1.6/"
-                          "v1.6.1: remote-or-NYC, word tiers, source labels, true "
-                          "daily pacing, /advisory."
+                    chat, f"⬆ Updated to v{VERSION}: TheirStack now reads its plan cap out of "
+                          "the error and retries at exactly that number — any tier "
+                          "works · cards redesigned: role+company bold, labeled "
+                          "Location/Comp lines · repost boards replaced by the true "
+                          "employer on cards."
+                          "own documented shapes; the failure reason now pushes to you "
+                          "automatically) · 🔴/🟢 source alerts the moment coverage "
+                          "changes · every drop opens with a coverage banner when "
+                          "anything is missing · plus all of v1.6/v1.6.1: remote-or-NYC, "
+                          "word tiers, source labels, capacity pacing, /advisory."
+                          "hold across all scans (JSearch was burning 8x intended; "
+                          "plan protected) · query windows rotate so the full pool "
+                          "sweeps each day · /status shows live paid-API consumption."
+                          "replaced with plain words (/why keeps the numbers) · every "
+                          "card names its source · paid capacity raised to ~75% of plan "
+                          "· Workday prefilled + WorkingNomads + WWR category feeds · "
+                          "/advisory launches the expert-network checklist."
                           "your links (LinkedIn included) and never invent names · "
                           "junk purged from the universe · plain questions get direct "
-                          "answers · degraded notices include the API\'s own error "
+                          "answers · degraded notices include the API's own error "
                           "text · TheirStack tries page-free payloads."
-                          "families score equally · employer universe (VC/PE/fintech/AI) "
-                          "wires in now and persists · JSearch survives slow queries · "
-                          "TheirStack self-diagnoses rejections · /debug shows full API "
-                          "error text · repost links penalized."
-                          "day's best (below-bar items labeled with scores) · fairer "
-                          "scoring on missing info · TheirStack + JSearch rebuilt from "
-                          "official docs · commands no longer queue behind scans.")
+                          "all four families score equally · employer universe (VC/PE/"
+                          "fintech/AI) wires in tonight and persists · JSearch survives "
+                          "slow queries · TheirStack self-diagnoses rejections · /debug "
+                          "now shows full API error text · repost-site links penalized.")
             except Exception:  # noqa: BLE001
                 pass
             dbm.kv_set(con, "code_version", VERSION)

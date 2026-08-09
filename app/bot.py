@@ -79,10 +79,12 @@ def _src_label(source: str) -> str:
 def _card_text(i: int, rec: dict, show_score: bool = False) -> str:
     j = rec["job"]
     esc = html.escape
-    head = f"<b>{i}. {rec['verdict']} · {_fit_word(rec)}</b> — {esc(j.title)}, {esc(j.company)}"
-    meta = " · ".join(x for x in (j.location, j.salary) if x)
+    head = f"<b>{i}. {esc(j.title)} — {esc(j.company)}</b>"
+    verdict = f"{rec['verdict']} · {_fit_word(rec)}"
+    comp = f" · Comp: {esc(j.salary)}" if j.salary else ""
+    loc = f"Location: {esc(j.location) if j.location else 'not stated'}{comp}"
     risk = f"\n<i>Risk: {esc(rec['risk'])}</i>" if rec.get("risk") else ""
-    return (f"{head}\n{esc(rec['blurb'])}\n{esc(meta)}"
+    return (f"{head}\n{verdict}\n{loc}\n{esc(rec['blurb'])}"
             f"\nSource: {esc(_src_label(j.source))}{risk}")
 
 
@@ -174,10 +176,7 @@ class Bot:
                     disable_web_page_preview=True)
                 await self.app.bot.send_message(chat, rec["job"].url,
                                                 disable_web_page_preview=True)
-        health = stats.get("health") or {}
-        if health.get("failed"):
-            await self.app.bot.send_message(
-                chat, f"⚠ degraded sources: {', '.join(health['failed'])} — recall reduced.")
+
         self.con.commit()
 
     # ------------------------------------------------------------ buttons

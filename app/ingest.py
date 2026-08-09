@@ -1112,6 +1112,18 @@ def fetch_theirstack(scfg: dict) -> list[Job]:
             break
         last_err = f"{label} -> HTTP {resp.status_code}: {resp.text[:250]}"
         LOG.warning("theirstack %s", last_err)
+        cap = re.search(r"limit parameter cannot be greater than (\d+)", resp.text)
+        if cap:
+            n = int(cap.group(1))
+            LOG.warning("theirstack: plan caps limit at %d - retrying at the cap", n)
+            r3 = requests.post("https://api.theirstack.com/v1/jobs/search",
+                               json={**body, "limit": n}, timeout=45, headers=hdrs)
+            if r3.ok:
+                payload = r3.json()
+                LOG.warning("theirstack: ACCEPTED at plan cap limit=%d (shape %r)", n, label)
+                break
+            last_err = f"{label}@cap{n} -> HTTP {r3.status_code}: {r3.text[:250]}"
+            LOG.warning("theirstack %s", last_err)
         if resp.status_code != 422:
             break
     if payload is None:

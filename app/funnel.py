@@ -217,6 +217,7 @@ def deep_eval(con, jobs, cfg) -> list[dict]:
               '[{"id":"j0","score":0-100,"dims":{'
             + ",".join(f'"{d}":0-100' for d in _DIMENSIONS)
             + '},"verdict":"APPLY|OUTREACH|INTRO|WATCH",'
+              '"employer":"true employer if the listed company is a job board/repost host; else omit",'
               '"blurb":"<=200 chars, verb-first, why it is top-decile or not",'
               '"risk":"<=90 chars"}]\n'
               "Prestige counts only when paired with autonomy (conditional). "
@@ -242,6 +243,11 @@ def deep_eval(con, jobs, cfg) -> list[dict]:
         for n, j in enumerate(batch):
             d = got.get(f"j{n}") or {}
             score = float(d.get("score", 50))
+            emp = (d.get("employer") or "").strip()
+            if emp and len(emp) > 2 and emp.lower() != (j.company or "").lower():
+                j.company = emp
+                con.execute("UPDATE opportunities SET company=? WHERE key=?",
+                            (emp, j.key))
             rec = {"job": j, "score": score, "dims": d.get("dims") or {},
                    "verdict": d.get("verdict") or "WATCH",
                    "blurb": (d.get("blurb") or j.title)[:220],
