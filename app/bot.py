@@ -174,9 +174,18 @@ class Bot:
                 "Preference logged — applied to ranking context immediately, "
                 "weight change proposed Sunday.")
             return
+        has_url = "http://" in low or "https://" in low
+        first = low.split(" ", 1)[0]
+        if not has_url and (low.rstrip().endswith("?") or first in (
+                "which", "what", "why", "how", "when", "who", "where",
+                "did", "does", "do", "is", "are", "can", "will")):
+            ans = await asyncio.to_thread(
+                regret_mod.answer_question, self.con, self.cfg, txt)
+            await update.message.reply_text(ans)
+            return
         # anything else forwarded = regret intake
         await update.message.reply_text("Running postmortem…")
-        pm = regret_mod.postmortem(self.con, self.cfg, txt)
+        pm = await asyncio.to_thread(regret_mod.postmortem, self.con, self.cfg, txt)
         self.con.commit()
         await update.message.reply_text(regret_mod.regret_card(pm))
 

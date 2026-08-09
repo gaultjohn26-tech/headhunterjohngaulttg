@@ -95,9 +95,11 @@ class Pipeline:
                 "fail_streak=0, total_items=total_items+?",
                 (name, now, count, count, now, count, count))
         for name in health.get("failed") or []:
+            note = (health.get("errors") or {}).get(name, "")
             self.con.execute(
-                "INSERT INTO sources(name,fail_streak) VALUES(?,1) "
-                "ON CONFLICT(name) DO UPDATE SET fail_streak=fail_streak+1", (name,))
+                "INSERT INTO sources(name,fail_streak,notes) VALUES(?,1,?) "
+                "ON CONFLICT(name) DO UPDATE SET fail_streak=fail_streak+1, "
+                "notes=excluded.notes", (name, note))
 
     def debug_sources(self) -> str:
         """Re-run every degraded source once; return real errors as text."""
@@ -217,8 +219,10 @@ class Pipeline:
         self.con.commit()
         scanned = self.con.execute("SELECT COUNT(*) c FROM flight WHERE stage='triage' "
                                    "AND ts>?", (cutoff,)).fetchone()["c"]
-        health = {"failed": [r["name"] for r in self.con.execute(
-            "SELECT name FROM sources WHERE fail_streak>=2")]}
+        frows = self.con.execute(
+            "SELECT name, notes FROM sources WHERE fail_streak>=2").fetchall()
+        health = {"failed": [r["name"] for r in frows],
+                  "errors": {r["name"]: (r["notes"] or "") for r in frows}}
         return picked, below, {"scanned": scanned, "health": health}
 
     # ------------------------------------------------------------ sunday
@@ -249,6 +253,13 @@ async def run():
     con = dbm.connect()
     cfg = load_cfg()
     planner.ensure_seeded(con)
+    # hygiene: purge junk the old regret engine may have written
+    cands = [c for c in (dbm.kv_get(con, "extra_candidates") or [])
+             if len(c) > 2 and c.lower() not in ("unknown", "n/a", "none")]
+    dbm.kv_set(con, "extra_candidates", cands)
+    qs = [q for q in (dbm.kv_get(con, "spawn_queries") or [])
+          if "?" not in q and len(q) < 70]
+    dbm.kv_set(con, "spawn_queries", qs)
     con.commit()
     pipe = Pipeline(con, cfg)
     bot = Bot(con, cfg, pipe)
@@ -297,7 +308,11 @@ async def run():
         if chat and dbm.kv_get(con, "code_version") != VERSION:
             try:
                 await bot.app.bot.send_message(
-                    chat, f"⬆ Updated to v{VERSION}: crypto priority bias removed — all four "
+                    chat, f"⬆ Updated to v{VERSION}: postmortems now read the page behind "
+                          "your links (LinkedIn included) and never invent names · "
+                          "junk purged from the universe · plain questions get direct "
+                          "answers · degraded notices include the API\'s own error "
+                          "text · TheirStack tries page-free payloads."
                           "families score equally · employer universe (VC/PE/fintech/AI) "
                           "wires in now and persists · JSearch survives slow queries · "
                           "TheirStack self-diagnoses rejections · /debug shows full API "

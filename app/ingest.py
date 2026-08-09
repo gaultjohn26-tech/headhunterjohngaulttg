@@ -1063,7 +1063,12 @@ def fetch_theirstack(scfg: dict) -> list[Job]:
                 ("no_order_by", {**base,
                                  **({"job_title_or": titles} if titles else {})}),
                 ("no_titles", {**base, "order_by": order}),
-                ("minimal", dict(base))]
+                ("minimal", dict(base)),
+                ("offset_style", {"offset": 0, "limit": base["limit"],
+                                  "posted_at_max_age_days": base["posted_at_max_age_days"],
+                                  **({"job_title_or": titles} if titles else {})}),
+                ("bare", {"limit": base["limit"],
+                          "posted_at_max_age_days": base["posted_at_max_age_days"]})]
     payload, last_err = None, ""
     for label, body in variants:
         resp = requests.post("https://api.theirstack.com/v1/jobs/search",
@@ -1165,7 +1170,7 @@ ALL_REMOTE_SOURCES = {"remotive", "remoteok", "jobicy", "jsearch", "web3career"}
 def collect_jobs(cfg: dict) -> tuple[list[Job], dict]:
     resolved = load_resolved()
     jobs: list[Job] = []
-    health = {"ok": [], "failed": [], "keyless": [], "disabled": []}
+    health = {"ok": [], "failed": [], "keyless": [], "disabled": [], "errors": {}}
     for name, fn in SOURCES.items():
         scfg = dict((cfg.get("sources") or {}).get(name) or {})
         if not scfg.get("enabled", False):
@@ -1185,6 +1190,7 @@ def collect_jobs(cfg: dict) -> tuple[list[Job], dict]:
             jobs.extend(got)
         except Exception as exc:  # noqa: BLE001 — one bad source must not kill the run
             health["failed"].append(name)
+            health["errors"][name] = str(exc)[:200]
             LOG.warning("%-12s FAILED: %s", name, exc)
     return jobs, health
 
