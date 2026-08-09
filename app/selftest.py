@@ -28,8 +28,10 @@ def main() -> int:
     assert picked and all(p["final"] >= funnel.BAR for p in picked)
     assert below, "below-bar tier must fill when fewer than 10 clear"
     assert all(b["final"] < funnel.BAR for b in below)
+    import html as _html
     card = _card_text(1, picked[0])
-    assert picked[0]["job"].title in card
+    assert _html.escape(picked[0]["job"].title) in card
+    assert 'href=' in card  # the title itself carries the link
     con.execute("INSERT INTO verdicts(opp_key,ts,verdict,note) VALUES(?,?,?,?)",
                 (picked[0]["job"].key, time.time(), "apply", ""))
     pm = regret.postmortem(con, cfg, "Head of Ecosystem at Berachain https://x/y")

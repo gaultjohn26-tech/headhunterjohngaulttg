@@ -118,6 +118,11 @@ sources:
     feeds:
       - {name: cryptojobslist, url: "https://cryptojobslist.com/jobs.rss?jobLocation=Remote"}
       - {name: weworkremotely, url: "https://weworkremotely.com/remote-jobs.rss"}
+      # candidate feeds - no public feed documented; misses skip silently
+      - {name: cryptocurrencyjobs, url: "https://cryptocurrencyjobs.co/feed/"}
+      - {name: cryptojobs-com, url: "https://www.cryptojobs.com/feed"}
+      - {name: remote3, url: "https://www.remote3.co/feed"}
+      - {name: crypto-jobs, url: "https://crypto.jobs/feed"}
       - {name: wwr-business, url: "https://weworkremotely.com/categories/remote-business-and-management-jobs.rss"}
       - {name: wwr-finance, url: "https://weworkremotely.com/categories/remote-finance-and-legal-jobs.rss"}
       # - {name: jobspresso, url: "https://jobspresso.co/feed/"}
@@ -262,7 +267,7 @@ sources:
   theirstack:                 # activates with THEIRSTACK_API_KEY
     enabled: true             # 1 credit = 1 job record returned
     max_age_days: 1             # only pull the last day's postings
-    plan_credits_month: 30000   # set to YOUR plan's credit allotment; the
+    plan_credits_month: 5200    # confirmed from dashboard Aug 9; the
                                 # scheduler paces spend evenly across the month
     title_patterns: [crypto, web3, blockchain, "business development",
                      partnerships, "venture capital", "private equity",

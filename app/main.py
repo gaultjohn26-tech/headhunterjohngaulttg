@@ -85,7 +85,15 @@ class Pipeline:
             days_left = max(1, (dt.date(today.year + (today.month == 12),
                                         (today.month % 12) + 1, 1) - today).days)
             spent = dbm.kv_get(self.con, f"ts_spent_{today:%Y%m}") or 0
-            ts["daily_record_limit"] = max(0, (plan - spent) // days_left)
+            daily_target = max(0, (plan - spent) // days_left)
+            day_key = f"ts_day_{today.isoformat()}"
+            day_spent = int(dbm.kv_get(self.con, day_key) or 0)
+            per_scan = max(1, daily_target // (24 // SCAN_EVERY_H))
+            allowance = min(per_scan, max(0, daily_target - day_spent))
+            if allowance <= 0:
+                ts["enabled"] = False  # today's credit slice is spent — rest
+                LOG.info("theirstack: daily credit target %d reached", daily_target)
+            ts["daily_record_limit"] = max(1, allowance)
         # regret-driven universe additions feed the resolver candidates
         extra = dbm.kv_get(self.con, "extra_candidates") or []
         cfg["watchlist_candidates"] = list({*(cfg.get("watchlist_candidates") or []), *extra})
@@ -149,6 +157,8 @@ class Pipeline:
             got = next(c for n, c in health["ok"] if n == "theirstack")
             k = f"ts_spent_{dt.date.today():%Y%m}"
             dbm.kv_set(self.con, k, (dbm.kv_get(self.con, k) or 0) + got)
+            dk = f"ts_day_{dt.date.today().isoformat()}"
+            dbm.kv_set(self.con, dk, (dbm.kv_get(self.con, dk) or 0) + got)
         for j in jobs:
             dbm.upsert_opportunity(self.con, j)
         evaled = {r["opp_key"]: r["ts"] for r in self.con.execute(
@@ -220,7 +230,6 @@ class Pipeline:
                         chat, "🚨 Exceptional find:\n" + _card_text(0, rec)
                         .replace("<b>0. ", "<b>"), parse_mode="HTML",
                         reply_markup=_card_kb(rec["job"].key))
-                    await bot.app.bot.send_message(chat, rec["job"].url)
                     dbm.record(self.con, rec["job"].key, "delivered", rec["final"])
                     self.con.execute("UPDATE opportunities SET status='delivered', "
                                      "delivered_at=? WHERE key=?", (now_ts, rec["job"].key))
@@ -240,7 +249,15 @@ class Pipeline:
             "WHERE o.status!='delivered' ORDER BY f.score DESC LIMIT 120",
             (cutoff,)).fetchall()
         evaluated = []
+        seen_urls, seen_roles = set(), set()
         for r in rows:
+            u = (r["url"] or "").rstrip("/").lower()
+            role = ((r["company"] or "").lower(), (r["title"] or "").lower()[:60])
+            if (u and u in seen_urls) or role in seen_roles:
+                continue  # duplicate posting reached us via two keys — keep best
+            if u:
+                seen_urls.add(u)
+            seen_roles.add(role)
             det = json.loads(r["d"] or "{}")
             j = _Opp(key=r["key"], source=r["source"], url=r["url"], title=r["title"],
                      company=r["company"], description=r["description"] or "",
@@ -347,7 +364,14 @@ async def run():
         if chat and dbm.kv_get(con, "code_version") != VERSION:
             try:
                 await bot.app.bot.send_message(
-                    chat, f"⬆ Updated to v{VERSION}: TheirStack now reads its plan cap out of "
+                    chat, f"⬆ Updated to v{VERSION}: TheirStack pacing locked to your real "
+                          "5,200/mo plan — ~170 credits/day sliced across scans, "
+                          "rests when the day\'s slice is spent · /status shows day + "
+                          "month consumption · includes v1.6.4: one linked card per "
+                          "job, duplicates collapsed, candidate crypto feeds."
+                          "link · duplicate postings collapsed · candidate feeds added "
+                          "for cryptocurrencyjobs.co, cryptojobs.com, remote3, "
+                          "crypto.jobs (wrong guesses skip silently)."
                           "the error and retries at exactly that number — any tier "
                           "works · cards redesigned: role+company bold, labeled "
                           "Location/Comp lines · repost boards replaced by the true "

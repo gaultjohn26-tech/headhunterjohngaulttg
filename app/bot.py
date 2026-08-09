@@ -79,7 +79,9 @@ def _src_label(source: str) -> str:
 def _card_text(i: int, rec: dict, show_score: bool = False) -> str:
     j = rec["job"]
     esc = html.escape
-    head = f"<b>{i}. {esc(j.title)} — {esc(j.company)}</b>"
+    href = html.escape(j.url or "", quote=True)
+    head = (f'<b><a href="{href}">{i}. {esc(j.title)} — {esc(j.company)}</a></b>'
+            if href else f"<b>{i}. {esc(j.title)} — {esc(j.company)}</b>")
     verdict = f"{rec['verdict']} · {_fit_word(rec)}"
     comp = f" · Comp: {esc(j.salary)}" if j.salary else ""
     loc = f"Location: {esc(j.location) if j.location else 'not stated'}{comp}"
@@ -161,8 +163,6 @@ class Bot:
                 chat, _card_text(i, rec), parse_mode=ParseMode.HTML,
                 reply_markup=_card_kb(rec["job"].key),
                 disable_web_page_preview=True)
-            await self.app.bot.send_message(chat, rec["job"].url,
-                                            disable_web_page_preview=True)
         if below:
             await self.app.bot.send_message(
                 chat, "── Close misses — just under my bar today; "
@@ -174,8 +174,6 @@ class Bot:
                     chat, _card_text(n, rec, show_score=True), parse_mode=ParseMode.HTML,
                     reply_markup=_card_kb(rec["job"].key),
                     disable_web_page_preview=True)
-                await self.app.bot.send_message(chat, rec["job"].url,
-                                                disable_web_page_preview=True)
 
         self.con.commit()
 
@@ -309,6 +307,12 @@ class Bot:
             f"{n_opp:,} opportunities tracked · {live}/{len(srcs)} sources healthy"
             + f"\nToday's paid/rate-limited usage — JSearch {js}/250 · "
               f"Adzuna {az}/50 · Jooble {jb}/25"
+            + (lambda tsm, tsd, plan:
+               f"\nTheirStack — {tsd} credits today · {tsm:,}/{plan:,} this month")(
+                dbm.kv_get(self.con, f"ts_spent_{_dt.date.today():%Y%m}") or 0,
+                dbm.kv_get(self.con, f"ts_day_{today}") or 0,
+                int(((self.cfg.get("sources") or {}).get("theirstack") or {})
+                    .get("plan_credits_month") or 5200))
             + (f" · degraded: {', '.join(bad)}" if bad else "")
             + f" · v{VERSION}")
 
