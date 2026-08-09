@@ -21,19 +21,69 @@ from . import regret as regret_mod
 
 LOG = logging.getLogger("bot")
 
+ADVISORY_NETWORKS = [
+    ("GLG", "https://glginsights.com/council-members/"),
+    ("AlphaSights", "https://www.alphasights.com/advisors/"),
+    ("Third Bridge", "https://www.thirdbridge.com/en/specialists/"),
+    ("Guidepoint", "https://www.guidepoint.com/advisors/"),
+    ("Dialectica", "https://www.dialecticanet.com/experts"),
+    ("NewtonX", "https://www.newtonx.com/experts/"),
+    ("Coleman Research", "https://www.colemanrg.com/"),
+    ("Catalant", "https://gocatalant.com/"),
+    ("Graphite", "https://www.graphite.com/"),
+    ("Business Talent Group", "https://www.businesstalentgroup.com/"),
+    ("Toptal Business", "https://www.toptal.com/"),
+    ("Bolster", "https://bolster.com/"),
+    ("GoFractional", "https://www.gofractional.com/"),
+]
+
 HIDE_REASONS = [("too_junior", "Too junior"), ("too_sales", "Too sales-heavy"),
                 ("wrong_industry", "Wrong industry"), ("wrong_comp", "Wrong comp"),
                 ("low_upside", "Not enough upside"), ("never_co", "Never this company")]
 
 
+def _fit_word(rec: dict) -> str:
+    s = rec.get("final", rec.get("score", 0)) or 0
+    if s >= 90:
+        return "Exceptional"
+    if s >= 80:
+        return "Strong fit"
+    if s >= 70:
+        return "Promising"
+    return "Marginal"
+
+
+def _src_label(source: str) -> str:
+    s = source or ""
+    if s.startswith("jsearch via "):
+        return s.split("via ", 1)[1] + " (via Google Jobs)"
+    if s.startswith("jsearch"):
+        return "Google Jobs"
+    if ":" in s:
+        base, slug = s.split(":", 1)
+        if base in ("greenhouse", "lever", "ashby", "workable", "smartrecruiters",
+                    "recruitee", "bamboohr", "pinpoint", "teamtailor", "workday"):
+            return f"{slug.replace('-', ' ').title()} careers ({base})"
+        if base == "rss":
+            return {"cryptojobslist": "CryptoJobsList",
+                    "weworkremotely": "We Work Remotely",
+                    "wwr-business": "We Work Remotely",
+                    "wwr-finance": "We Work Remotely"}.get(slug, slug)
+        if base == "signal":
+            return f"signal · {slug}"
+    return {"workingnomads": "WorkingNomads", "remoteok": "RemoteOK",
+            "themuse": "The Muse", "hackernews": "HN Who's Hiring",
+            "theirstack": "TheirStack", "web3career": "web3.career"}.get(s, s)
+
+
 def _card_text(i: int, rec: dict, show_score: bool = False) -> str:
     j = rec["job"]
     esc = html.escape
-    score = f" · {rec.get('final', rec.get('score', 0)):.0f}" if show_score else ""
-    head = f"<b>{i}. {rec['verdict']}{score}</b> — {esc(j.title)}, {esc(j.company)}"
+    head = f"<b>{i}. {rec['verdict']} · {_fit_word(rec)}</b> — {esc(j.title)}, {esc(j.company)}"
     meta = " · ".join(x for x in (j.location, j.salary) if x)
     risk = f"\n<i>Risk: {esc(rec['risk'])}</i>" if rec.get("risk") else ""
-    return f"{head}\n{esc(rec['blurb'])}\n{esc(meta)}{risk}"
+    return (f"{head}\n{esc(rec['blurb'])}\n{esc(meta)}"
+            f"\nSource: {esc(_src_label(j.source))}{risk}")
 
 
 def _card_kb(key: str) -> InlineKeyboardMarkup:
@@ -67,6 +117,7 @@ class Bot:
         self.app.add_handler(CommandHandler("scan", self.on_scan))
         self.app.add_handler(CommandHandler("drop", self.on_drop))
         self.app.add_handler(CommandHandler("debug", self.on_debug))
+        self.app.add_handler(CommandHandler("advisory", self.on_advisory))
         self.app.add_handler(CallbackQueryHandler(self.on_button))
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_text))
 
@@ -90,8 +141,17 @@ class Bot:
             return
         d = datetime.now(timezone.utc).strftime("%a %b %-d")
         await self.app.bot.send_message(
-            chat, f"⚡ <b>{d}</b> — scanned {stats.get('scanned', 0):,} new · "
+            chat, f"⚡ <b>{d}</b> — {stats.get('fetched', 0):,} scanned · "
+                  f"{stats.get('scanned', 0):,} new · "
                   f"{len(picked)} cleared the bar", parse_mode=ParseMode.HTML)
+        health = stats.get("health") or {}
+        if health.get("failed"):
+            errs = health.get("errors") or {}
+            lines = [f"{n} — {errs[n][:150]}" if errs.get(n) else n
+                     for n in health["failed"]]
+            await self.app.bot.send_message(
+                chat, "🛑 COVERAGE GAP — missing right now: " + " ; ".join(lines)
+                      + "\nTreat this slate as PARTIAL until recovery is announced.")
         for i, rec in enumerate(picked, 1):
             self.con.execute("UPDATE opportunities SET decision=? WHERE key=?",
                              (rec["verdict"], rec["job"].key))
@@ -103,8 +163,8 @@ class Bot:
                                             disable_web_page_preview=True)
         if below:
             await self.app.bot.send_message(
-                chat, "── Below the bar — best of the rest. Scores shown; "
-                      "your taps teach the ranker. ──")
+                chat, "── Close misses — just under my bar today; "
+                      "your taps teach it what the bar should mean. ──")
             for n, rec in enumerate(below, len(picked) + 1):
                 self.con.execute("UPDATE opportunities SET decision=? WHERE key=?",
                                  (rec["verdict"], rec["job"].key))
@@ -153,6 +213,18 @@ class Bot:
             if action.startswith("hide"):
                 await q.edit_message_reply_markup(None)
 
+    async def on_advisory(self, update: Update, _):
+        status = dbm.kv_get(self.con, "advisory_status") or {}
+        lines = ["<b>Advisory & expert-network channel</b>",
+                 "These are enrollment marketplaces — nothing to scrape; being "
+                 "registered IS the coverage. Reply e.g. <i>enrolled GLG</i> and "
+                 "I'll track it.\n"]
+        for name, url in ADVISORY_NETWORKS:
+            mark = "✅" if name.lower() in status else "⬜"
+            lines.append(f"{mark} {name} — {url}")
+        await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML,
+                                        disable_web_page_preview=True)
+
     # ------------------------------------------------------------ text & regret
     async def on_text(self, update: Update, _):
         txt = (update.message.text or "").strip()
@@ -174,6 +246,18 @@ class Bot:
                 "Preference logged — applied to ranking context immediately, "
                 "weight change proposed Sunday.")
             return
+        first_word = low.split(" ", 1)[0]
+        if first_word in ("enrolled", "applied", "joined", "done") and len(txt.split()) <= 5:
+            target = txt.split(" ", 1)[1].strip() if " " in txt else ""
+            match = next((n for n, _ in ADVISORY_NETWORKS
+                          if target.lower() in n.lower()), None)
+            if match:
+                st = dbm.kv_get(self.con, "advisory_status") or {}
+                st[match.lower()] = time.time()
+                dbm.kv_set(self.con, "advisory_status", st)
+                self.con.commit()
+                await update.message.reply_text(f"Tracked: {match} ✅ — /advisory shows the board.")
+                return
         has_url = "http://" in low or "https://" in low
         first = low.split(" ", 1)[0]
         if not has_url and (low.rstrip().endswith("?") or first in (
@@ -217,8 +301,15 @@ class Bot:
         live = sum(1 for s in srcs if s["fail_streak"] == 0)
         bad = [s["name"] for s in srcs if s["fail_streak"] >= 2]
         n_opp = self.con.execute("SELECT COUNT(*) c FROM opportunities").fetchone()["c"]
+        import datetime as _dt
+        today = _dt.date.today().isoformat()
+        js = dbm.kv_get(self.con, f"spent_jsearch_{today}") or 0
+        az = dbm.kv_get(self.con, f"spent_adzuna_{today}") or 0
+        jb = dbm.kv_get(self.con, f"spent_jooble_{today}") or 0
         await update.message.reply_text(
             f"{n_opp:,} opportunities tracked · {live}/{len(srcs)} sources healthy"
+            + f"\nToday's paid/rate-limited usage — JSearch {js}/250 · "
+              f"Adzuna {az}/50 · Jooble {jb}/25"
             + (f" · degraded: {', '.join(bad)}" if bad else "")
             + f" · v{VERSION}")
 

@@ -128,6 +128,11 @@ def http_get_json_extra(url: str, params: dict | None = None,
     return resp.json()
 
 
+def looks_nyc(text: str) -> bool:
+    t = (text or "").lower()
+    return any(w in t for w in ("new york", "nyc", "brooklyn", "manhattan"))
+
+
 def looks_remote(text: str) -> bool:
     t = (text or "").lower()
     return any(w in t for w in ("remote", "anywhere", "worldwide", "flexible"))
@@ -727,6 +732,24 @@ def _parse_posted_on(text: str, now: datetime) -> datetime | None:
     return None
 
 
+def fetch_workingnomads(scfg: dict) -> list[Job]:
+    data = http_get_json("https://www.workingnomads.com/api/exposed_jobs/")
+    out: list[Job] = []
+    for j in data if isinstance(data, list) else []:
+        out.append(Job(
+            source="workingnomads",
+            source_id=j.get("url", ""),
+            url=j.get("url", ""),
+            title=(j.get("title") or "").strip(),
+            company=(j.get("company_name") or "").strip(),
+            description=", ".join(filter(None, [j.get("category_name"),
+                                                j.get("tags")]))[:500],
+            location=j.get("location") or "Remote",
+            posted_at=parse_when(j.get("pub_date")),
+        ))
+    return out
+
+
 def fetch_workday(scfg: dict) -> list[Job]:
     now = datetime.now(timezone.utc)
     out: list[Job] = []
@@ -1053,38 +1076,46 @@ def fetch_theirstack(scfg: dict) -> list[Job]:
     hdrs = {"Authorization": f"Bearer {key}",
             "Content-Type": "application/json",
             "User-Agent": USER_AGENT}
-    base = {"page": 0,
-            "limit": int(scfg.get("daily_record_limit") or 100),
-            "posted_at_max_age_days": int(scfg.get("max_age_days") or 1)}
-    order = [{"desc": True, "field": "date_posted"}]
+    cfg_limit = int(scfg.get("daily_record_limit") or 100)
+    cfg_age = max(1, int(scfg.get("max_age_days") or 1))
     titles = scfg.get("title_patterns") or []
-    variants = [("full", {**base, "order_by": order,
+    probe = {"limit": 25, "page": 0, "posted_at_max_age_days": cfg_age}
+    ladder = [
+        ("official_clone", dict(probe)),
+        ("clone_plus_titles", {**probe, **({"job_title_or": titles} if titles else {})}),
+        ("clone_plus_order", {**probe,
+                              "order_by": [{"desc": True, "field": "date_posted"}]}),
+        ("offset_style", {"offset": 0, "limit": 25, "posted_at_max_age_days": cfg_age,
                           **({"job_title_or": titles} if titles else {})}),
-                ("no_order_by", {**base,
-                                 **({"job_title_or": titles} if titles else {})}),
-                ("no_titles", {**base, "order_by": order}),
-                ("minimal", dict(base)),
-                ("offset_style", {"offset": 0, "limit": base["limit"],
-                                  "posted_at_max_age_days": base["posted_at_max_age_days"],
-                                  **({"job_title_or": titles} if titles else {})}),
-                ("bare", {"limit": base["limit"],
-                          "posted_at_max_age_days": base["posted_at_max_age_days"]})]
+        ("desired_full", {"page": 0, "limit": cfg_limit,
+                          "posted_at_max_age_days": cfg_age,
+                          "order_by": [{"desc": True, "field": "date_posted"}],
+                          **({"job_title_or": titles} if titles else {})}),
+    ]
     payload, last_err = None, ""
-    for label, body in variants:
+    for label, body in ladder:
         resp = requests.post("https://api.theirstack.com/v1/jobs/search",
                              json=body, timeout=45, headers=hdrs)
         if resp.ok:
             payload = resp.json()
-            if label != "full":
-                LOG.warning("theirstack: %r variant accepted -- full payload was "
-                            "rejected with %s", label, last_err[:200])
+            LOG.warning("theirstack: %r shape ACCEPTED (fields: %s)",
+                        label, ",".join(sorted(body)))
+            if body.get("limit", 0) < cfg_limit:
+                up = {**body, "limit": cfg_limit}
+                r2 = requests.post("https://api.theirstack.com/v1/jobs/search",
+                                   json=up, timeout=45, headers=hdrs)
+                if r2.ok:
+                    payload = r2.json()
+                else:
+                    LOG.warning("theirstack: limit=%d rejected (%s) — keeping 25",
+                                cfg_limit, r2.status_code)
             break
-        last_err = f"HTTP {resp.status_code}: {resp.text[:250]}"
-        LOG.warning("theirstack %s rejected -- %s", label, last_err)
+        last_err = f"{label} -> HTTP {resp.status_code}: {resp.text[:250]}"
+        LOG.warning("theirstack %s", last_err)
         if resp.status_code != 422:
             break
     if payload is None:
-        raise RuntimeError(f"theirstack failed on all payload variants; {last_err}")
+        raise RuntimeError(f"theirstack rejected every documented shape; {last_err}")
     rows = payload.get("data") or payload.get("jobs") or []
     out: list[Job] = []
     for j in rows:
@@ -1156,6 +1187,7 @@ SOURCES = {
     "workable": fetch_workable,
     "smartrecruiters": fetch_smartrecruiters,
     "recruitee": fetch_recruitee,
+    "workingnomads": fetch_workingnomads,
     "workday": fetch_workday,
     "rss": fetch_rss,
     "bamboohr": fetch_bamboohr,
@@ -1164,7 +1196,7 @@ SOURCES = {
     "theirstack": fetch_theirstack,
 }
 
-ALL_REMOTE_SOURCES = {"remotive", "remoteok", "jobicy", "jsearch", "web3career"}  # remote by construction
+ALL_REMOTE_SOURCES = {"remotive", "remoteok", "jobicy", "jsearch", "web3career", "workingnomads"}  # remote by construction
 
 
 def collect_jobs(cfg: dict) -> tuple[list[Job], dict]:
@@ -1232,6 +1264,8 @@ def prefilter(jobs: list[Job], cfg: dict, now: datetime) -> list[Job]:
             and not looks_remote(j.location)
             and not looks_remote(j.title)
             and not looks_remote(j.description[:800])
+            and not looks_nyc(j.location)
+            and not looks_nyc(j.title)
         ):
             continue
         title_l = j.title.lower()

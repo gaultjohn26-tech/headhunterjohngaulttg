@@ -30,16 +30,21 @@ def ensure_seeded(con) -> int:
     return n
 
 def live_queries(con, source: str, budget: int) -> list[str]:
-    # yield-weighted rotation: proven queries daily, the long tail round-robins
-    rows = con.execute("SELECT text, unique_earliest, last_yield FROM queries "
+    """Proven queries get priority seats; the rest of the budget is a
+    circular window over the whole pool, advancing every call — so a day's
+    scans sweep different queries instead of repeating one slice."""
+    rows = con.execute("SELECT text, unique_earliest FROM queries "
                        "WHERE source=? AND state='live'", (source,)).fetchall()
     proven = [r["text"] for r in rows if r["unique_earliest"] > 0]
-    rest = sorted((r for r in rows if r["unique_earliest"] == 0),
-                  key=lambda r: (r["last_yield"] or 0))
-    picked = proven[:budget]
-    for r in rest:
-        if len(picked) >= budget: break
-        picked.append(r["text"])
+    rest = [r["text"] for r in rows if r["unique_earliest"] == 0]
+    head = proven[: max(1, budget // 5)] if proven else []
+    room = max(0, budget - len(head))
+    picked = list(head)
+    if rest and room:
+        cur = int(dbm.kv_get(con, f"qcursor_{source}") or 0) % len(rest)
+        for i in range(min(room, len(rest))):
+            picked.append(rest[(cur + i) % len(rest)])
+        dbm.kv_set(con, f"qcursor_{source}", (cur + room) % len(rest))
     return picked
 
 def credit_query(con, source: str, text: str, unique_earliest: int) -> None:

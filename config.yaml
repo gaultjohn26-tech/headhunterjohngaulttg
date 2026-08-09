@@ -118,6 +118,8 @@ sources:
     feeds:
       - {name: cryptojobslist, url: "https://cryptojobslist.com/jobs.rss?jobLocation=Remote"}
       - {name: weworkremotely, url: "https://weworkremotely.com/remote-jobs.rss"}
+      - {name: wwr-business, url: "https://weworkremotely.com/categories/remote-business-and-management-jobs.rss"}
+      - {name: wwr-finance, url: "https://weworkremotely.com/categories/remote-finance-and-legal-jobs.rss"}
       # - {name: jobspresso, url: "https://jobspresso.co/feed/"}
 
   # --- Layer 2: major-site aggregators ---
@@ -162,7 +164,7 @@ sources:
     # the verified $25/mo OpenWeb Ninja plan (10,000 req/mo): 45 lines x 2
     # pages x 31 days ~= 2,800/mo — under a third of quota. On the FREE tier
     # (200/mo) set pages: 1 and daily_request_budget: 6 instead.
-    daily_request_budget: 100
+    daily_request_budget: 250  # ~7,500/mo of the 10k plan
     searches:
       - crypto business development remote
       - venture capital analyst remote
@@ -235,9 +237,17 @@ sources:
   recruitee:
     enabled: true
     companies: []
+  workingnomads:              # workingnomads.com — direct, no key
+    enabled: true
   workday:                    # big banks / asset managers post here.
-    enabled: true             # Paste careers URLs exactly as they appear:
-    urls: []                  #   e.g. "https://tenant.wd5.myworkdayjobs.com/SiteName"
+    enabled: true             # candidates below — wrong ones skip silently;
+    urls:                     # forward any Workday careers page to add more
+      - "https://jpmc.wd5.myworkdayjobs.com/JPMC"
+      - "https://blackrock.wd1.myworkdayjobs.com/BlackRock_Professional"
+      - "https://fmr.wd1.myworkdayjobs.com/FidelityCareers"
+      - "https://blackstone.wd1.myworkdayjobs.com/Blackstone_Careers"
+      - "https://pimco.wd1.myworkdayjobs.com/PIMCO"
+      - "https://point72.wd5.myworkdayjobs.com/Point72"                  #   e.g. "https://tenant.wd5.myworkdayjobs.com/SiteName"
   bamboohr:                   # <slug>.bamboohr.com — auto-filled by resolver
     enabled: true
     companies: []

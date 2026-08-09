@@ -225,7 +225,11 @@ def deep_eval(con, jobs, cfg) -> list[dict]:
               "expected value from what IS stated and put uncertainty in risk. "
               "A strong-fit role at a strong company with typical unknowns "
               "belongs in the 80s. Only positive evidence of meeting-heavy or "
-              "quota patterns caps the score at 60. If host= is a repost or "
+              "quota patterns caps the score at 60. Location rule: remote is "
+              "preferred; NYC-based is acceptable ONLY when office presence is "
+              "clearly infrequent and meetings light — frequent in-person NYC "
+              "caps at 70; any other location requiring presence caps at 40. "
+              "If host= is a repost or "
               "aggregator site rather than the employer or a major job board, "
               "note 'unverified listing' in risk and score conservatively.\n\n" + listing)
         try:

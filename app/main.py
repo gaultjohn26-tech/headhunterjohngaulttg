@@ -61,12 +61,23 @@ class Pipeline:
     def _apply_planner_and_pacing(self) -> dict:
         cfg = json.loads(json.dumps(self.cfg))  # deep copy per cycle
         src = cfg.setdefault("sources", {})
-        budgets = {"jsearch": int((src.get("jsearch") or {}).get("daily_request_budget") or 100),
-                   "adzuna": 25, "jooble": 15}
-        for name, budget in budgets.items():
-            qs = planner.live_queries(self.con, name, budget)
+        daily = {"jsearch": int((src.get("jsearch") or {}).get("daily_request_budget") or 250),
+                 "adzuna": 50, "jooble": 25}
+        today = dt.date.today().isoformat()
+        for name, day_budget in daily.items():
+            k = f"spent_{name}_{today}"
+            spent = int(dbm.kv_get(self.con, k) or 0)
+            per_scan = max(1, day_budget // (24 // SCAN_EVERY_H))
+            allowance = min(per_scan, max(0, day_budget - spent))
+            if allowance <= 0:
+                src.setdefault(name, {})["searches"] = []
+                LOG.info("%s: daily budget %d spent — resting until tomorrow",
+                         name, day_budget)
+                continue
+            qs = planner.live_queries(self.con, name, allowance)
             if qs:
                 src.setdefault(name, {})["searches"] = qs
+                dbm.kv_set(self.con, k, spent + len(qs))
         ts = src.get("theirstack") or {}
         if ts.get("enabled"):
             plan = int(ts.get("plan_credits_month") or 30000)
@@ -163,11 +174,36 @@ class Pipeline:
             base = j.source.split(":")[0].split(" ")[0]
             if base in ("jsearch", "adzuna", "jooble"):
                 planner.credit_query(self.con, base, "", 0)  # coarse v1 credit
+        log = (dbm.kv_get(self.con, "fetch_log") or [])[-30:]
+        log.append({"ts": time.time(), "n": len(jobs)})
+        dbm.kv_set(self.con, "fetch_log", log)
         self.con.commit()
         return {"scanned": len(jobs), "evaluated": evaluated, "health": health}
 
     async def scan_and_maybe_flash(self, bot: Bot) -> dict:
         stats = await asyncio.to_thread(self.scan)
+        # loud coverage transitions: new failures push immediately, in the API's words
+        failed_now = set((stats.get("health") or {}).get("failed") or [])
+        errs = (stats.get("health") or {}).get("errors") or {}
+        prev = set(dbm.kv_get(self.con, "failing_set") or [])
+        chat_id = dbm.kv_get(self.con, "chat_id")
+        if chat_id:
+            for name in sorted(failed_now - prev):
+                try:
+                    await bot.app.bot.send_message(
+                        chat_id, f"🔴 SOURCE DOWN: {name}\n"
+                                 f"{(errs.get(name) or 'no detail')[:280]}\n"
+                                 "Coverage is reduced until this recovers — "
+                                 "treat drops as partial. I'll announce recovery.")
+                except Exception:  # noqa: BLE001
+                    pass
+            for name in sorted(prev - failed_now):
+                try:
+                    await bot.app.bot.send_message(chat_id, f"🟢 Source recovered: {name}")
+                except Exception:  # noqa: BLE001
+                    pass
+        dbm.kv_set(self.con, "failing_set", sorted(failed_now))
+        self.con.commit()
         flashed = 0
         now_ts = time.time()
         sent_today = dbm.kv_get(self.con, "flashed_today") or {"d": "", "n": 0}
@@ -223,7 +259,10 @@ class Pipeline:
             "SELECT name, notes FROM sources WHERE fail_streak>=2").fetchall()
         health = {"failed": [r["name"] for r in frows],
                   "errors": {r["name"]: (r["notes"] or "") for r in frows}}
-        return picked, below, {"scanned": scanned, "health": health}
+        cutoff24 = time.time() - 24 * 3600
+        fetched = sum(e["n"] for e in (dbm.kv_get(self.con, "fetch_log") or [])
+                      if e["ts"] > cutoff24)
+        return picked, below, {"scanned": scanned, "fetched": fetched, "health": health}
 
     # ------------------------------------------------------------ sunday
     def sunday_brief(self) -> dict:
@@ -308,7 +347,12 @@ async def run():
         if chat and dbm.kv_get(con, "code_version") != VERSION:
             try:
                 await bot.app.bot.send_message(
-                    chat, f"⬆ Updated to v{VERSION}: postmortems now read the page behind "
+                    chat, f"⬆ Updated to v{VERSION}: TheirStack diagnostic ladder (probes their "
+                          "own documented shapes; failures push their reason to you "
+                          "automatically) · 🔴/🟢 source alerts on any coverage change "
+                          "· coverage banner atop partial drops · plus all of v1.6/"
+                          "v1.6.1: remote-or-NYC, word tiers, source labels, true "
+                          "daily pacing, /advisory."
                           "your links (LinkedIn included) and never invent names · "
                           "junk purged from the universe · plain questions get direct "
                           "answers · degraded notices include the API\'s own error "
