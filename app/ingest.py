@@ -467,11 +467,14 @@ def fetch_jsearch(scfg: dict) -> list[Job]:
     failed_queries: list = []
     for q in (scfg.get("searches") or [])[:budget]:
         params = {"query": q, "date_posted": scfg.get("date_posted") or "3days"}
+        nyc_query = "new york" in q.lower() or "nyc" in q.lower()
         if own_key:
-            params["work_from_home"] = "true"   # documented remote filter (direct API)
+            if not nyc_query:
+                params["work_from_home"] = "true"  # remote filter only on remote-lane queries
         else:
-            params.update({"page": 1, "num_pages": int(scfg.get("pages") or 1),
-                           "remote_jobs_only": "true"})
+            params.update({"page": 1, "num_pages": int(scfg.get("pages") or 1)})
+            if not nyc_query:
+                params["remote_jobs_only"] = "true"
         data, q_errors = None, []
         for ep in list(endpoints):
             for attempt in (1, 2):
@@ -1080,17 +1083,17 @@ def fetch_theirstack(scfg: dict) -> list[Job]:
     cfg_age = max(1, int(scfg.get("max_age_days") or 1))
     titles = scfg.get("title_patterns") or []
     probe = {"limit": 25, "page": 0, "posted_at_max_age_days": cfg_age}
-    ladder = [
-        ("official_clone", dict(probe)),
-        ("clone_plus_titles", {**probe, **({"job_title_or": titles} if titles else {})}),
-        ("clone_plus_order", {**probe,
-                              "order_by": [{"desc": True, "field": "date_posted"}]}),
-        ("offset_style", {"offset": 0, "limit": 25, "posted_at_max_age_days": cfg_age,
-                          **({"job_title_or": titles} if titles else {})}),
-        ("desired_full", {"page": 0, "limit": cfg_limit,
-                          "posted_at_max_age_days": cfg_age,
-                          "order_by": [{"desc": True, "field": "date_posted"}],
-                          **({"job_title_or": titles} if titles else {})}),
+    tfilter = {"job_title_or": titles} if titles else {}
+    ladder = [  # most-filtered first: credits should buy RELEVANT jobs
+        ("titles_us_order", {**probe, **tfilter,
+                             "job_country_code_or": ["US"],
+                             "order_by": [{"desc": True, "field": "date_posted"}]}),
+        ("titles_order", {**probe, **tfilter,
+                          "order_by": [{"desc": True, "field": "date_posted"}]}),
+        ("titles_only", {**probe, **tfilter}),
+        ("offset_titles", {"offset": 0, "limit": 25,
+                           "posted_at_max_age_days": cfg_age, **tfilter}),
+        ("official_clone", dict(probe)),  # unfiltered last resort
     ]
     payload, last_err = None, ""
     for label, body in ladder:

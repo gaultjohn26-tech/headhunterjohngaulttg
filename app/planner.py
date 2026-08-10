@@ -17,15 +17,27 @@ SECTORS = ["crypto", "web3", "digital assets", "defi", "stablecoin", "blockchain
            "venture studio", "incubator", "fund", ""]
 
 def ensure_seeded(con) -> int:
-    if dbm.kv_get(con, "planner_seeded"):
-        return 0
+    """Versioned seeding: v1 = remote-phrased pool; v2 adds the NYC lane
+    (query text decides per-query remote filtering downstream)."""
+    ver = int(dbm.kv_get(con, "planner_seed_v") or (1 if dbm.kv_get(con, "planner_seeded") else 0))
     now, n = time.time(), 0
-    combos = [f"{s} {r} remote".strip() for r, s in itertools.product(ROLES, SECTORS)]
-    random.shuffle(combos)
-    for q in combos:
-        for src in ("jsearch", "adzuna", "jooble"):
-            con.execute("INSERT OR IGNORE INTO queries(source,text,born,state) VALUES(?,?,?,'live')",
-                        (src, q, now)); n += 1
+    if ver < 1:
+        combos = [f"{s} {r} remote".strip() for r, s in itertools.product(ROLES, SECTORS)]
+        random.shuffle(combos)
+        for q in combos:
+            for src in ("jsearch", "adzuna", "jooble"):
+                con.execute("INSERT OR IGNORE INTO queries(source,text,born,state) "
+                            "VALUES(?,?,?,'live')", (src, q, now))
+                n += 1
+    if ver < 2:
+        nyc = [f"{s} {r} new york".strip() for r, s in itertools.product(ROLES, SECTORS)]
+        random.shuffle(nyc)
+        for q in nyc:
+            for src in ("jsearch", "adzuna", "jooble"):
+                con.execute("INSERT OR IGNORE INTO queries(source,text,born,state) "
+                            "VALUES(?,?,?,'live')", (src, q, now))
+                n += 1
+    dbm.kv_set(con, "planner_seed_v", 2)
     dbm.kv_set(con, "planner_seeded", True)
     return n
 

@@ -316,6 +316,10 @@ async def run():
     qs = [q for q in (dbm.kv_get(con, "spawn_queries") or [])
           if "?" not in q and len(q) < 70]
     dbm.kv_set(con, "spawn_queries", qs)
+    for name in (cfg.get("company_blocklist") or []):
+        con.execute("INSERT INTO companies(name, never_show, added_by, created_at) "
+                    "VALUES(?,1,'config',?) ON CONFLICT(name) DO UPDATE SET never_show=1",
+                    (name, time.time()))
     con.commit()
     pipe = Pipeline(con, cfg)
     bot = Bot(con, cfg, pipe)
@@ -364,7 +368,14 @@ async def run():
         if chat and dbm.kv_get(con, "code_version") != VERSION:
             try:
                 await bot.app.bot.send_message(
-                    chat, f"⬆ Updated to v{VERSION}: TheirStack pacing locked to your real "
+                    chat, f"⬆ Updated to v{VERSION}: pass line recalibrated — roles like the "
+                          "78-scored OpenAI BD now DELIVER as cleared, not close-miss "
+                          "· gig-marketplace junk banned (SaidGig, FlexBoard, GrabJobs) "
+                          "· plus v1.6.6: NYC query lane + credit-efficient TheirStack."
+                          "asks the boards for New York roles too (remote filters "
+                          "auto-drop on those queries) · TheirStack tries title-"
+                          "filtered shapes first so credits buy relevant roles · "
+                          "digital-asset pattern added."
                           "5,200/mo plan — ~170 credits/day sliced across scans, "
                           "rests when the day\'s slice is spent · /status shows day + "
                           "month consumption · includes v1.6.4: one linked card per "

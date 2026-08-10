@@ -38,6 +38,13 @@ require_remote: true
 
 url_blocklist:              # repost/spam domains — never deliver these links
   - mysmartpros.com
+  - liveblog365.com
+  - grabjobs.co
+  - grabjobs
+
+company_blocklist:          # marketplaces posing as employers — never deliver
+  - SaidGig
+  - FlexBoard
 
 include_keywords:
   - crypto
@@ -269,7 +276,7 @@ sources:
     max_age_days: 1             # only pull the last day's postings
     plan_credits_month: 5200    # confirmed from dashboard Aug 9; the
                                 # scheduler paces spend evenly across the month
-    title_patterns: [crypto, web3, blockchain, "business development",
+    title_patterns: ["digital asset", crypto, web3, blockchain, "business development",
                      partnerships, "venture capital", "private equity",
                      "investor relations", "research analyst", "fund operations",
                      treasury, "portfolio operations"]

@@ -16,7 +16,7 @@ LOG = logging.getLogger("funnel")
 
 TRIAGE_KEEP = 300          # items per cycle that reach the screen
 DEEP_KEEP = 60             # items per cycle that reach deep evaluation
-BAR = 80.0                 # absolute calibrated bar for delivery
+BAR = 75.0                 # pass line matched to observed grader distribution
 DAILY_N = 10
 POSTING_HALF_LIFE_D = 6.0  # posted roles decay ~5-7d; signals reset clock
 SIGNAL_HALF_LIFE_D = 30.0
@@ -225,7 +225,9 @@ def deep_eval(con, jobs, cfg) -> list[dict]:
               "unlisted salary, unstated culture, or unknown meeting load; score "
               "expected value from what IS stated and put uncertainty in risk. "
               "A strong-fit role at a strong company with typical unknowns "
-              "belongs in the 80s. Only positive evidence of meeting-heavy or "
+              "belongs in the 80s — an opportunity clearly worth 15 minutes of "
+              "this candidate's attention today scores 80+; reserve the 70s for "
+              "genuine maybes. Only positive evidence of meeting-heavy or "
               "quota patterns caps the score at 60. Location rule: remote is "
               "preferred; NYC-based is acceptable ONLY when office presence is "
               "clearly infrequent and meetings light — frequent in-person NYC "
