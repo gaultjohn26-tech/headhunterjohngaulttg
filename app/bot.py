@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import requests
 import json
 import logging
 import os
@@ -20,6 +21,24 @@ from . import db as dbm
 from . import regret as regret_mod
 
 LOG = logging.getLogger("bot")
+
+INGEST_URL = os.environ.get("INGEST_URL", "")  # dashboard channel — inert until set
+
+
+def _post_ingest(recs: list[dict]) -> None:
+    """Additive second delivery channel: POST the day's picks to a dashboard.
+    Does nothing unless INGEST_URL is explicitly configured."""
+    if not INGEST_URL or not recs:
+        return
+    items = [{
+        "title": f"{r['job'].title} — {r['job'].company}",
+        "url": r["job"].url,
+        "note": f"{r['verdict']} {r.get('final', r.get('score', 0)):.0f} · {r['blurb']}",
+    } for r in recs]
+    try:
+        requests.post(INGEST_URL, json={"items": items}, timeout=10)
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning("ingest POST failed: %s", exc)
 
 ADVISORY_NETWORKS = [
     ("GLG", "https://glginsights.com/council-members/"),
@@ -140,6 +159,7 @@ class Bot:
 
     # ------------------------------------------------------------ daily drop
     async def send_daily(self, picked: list[dict], below: list | None, stats: dict):
+        await asyncio.to_thread(_post_ingest, picked + (below or []))
         chat = await self.chat_id()
         if not chat:
             return

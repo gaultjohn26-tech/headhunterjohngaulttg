@@ -368,7 +368,10 @@ async def run():
         if chat and dbm.kv_get(con, "code_version") != VERSION:
             try:
                 await bot.app.bot.send_message(
-                    chat, f"⬆ Updated to v{VERSION}: pass line recalibrated — roles like the "
+                    chat, f"⬆ Updated to v{VERSION}: dashboard delivery channel added — daily "
+                          "picks POST to INGEST_URL when that env var is set (inert "
+                          "otherwise; Telegram unchanged) · includes v1.6.7 pass-line "
+                          "fix + junk bans + v1.6.6 NYC lane."
                           "78-scored OpenAI BD now DELIVER as cleared, not close-miss "
                           "· gig-marketplace junk banned (SaidGig, FlexBoard, GrabJobs) "
                           "· plus v1.6.6: NYC query lane + credit-efficient TheirStack."
