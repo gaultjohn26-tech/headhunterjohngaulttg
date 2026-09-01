@@ -179,10 +179,11 @@ class Bot:
         for i, rec in enumerate(picked, 1):
             self.con.execute("UPDATE opportunities SET decision=? WHERE key=?",
                              (rec["verdict"], rec["job"].key))
-            await self.app.bot.send_message(
+            msg = await self.app.bot.send_message(
                 chat, _card_text(i, rec), parse_mode=ParseMode.HTML,
                 reply_markup=_card_kb(rec["job"].key),
                 disable_web_page_preview=True)
+            self._remember_card_message(rec["job"].key, chat, msg.message_id)
         if below:
             await self.app.bot.send_message(
                 chat, "── Close misses — just under my bar today; "
@@ -190,12 +191,133 @@ class Bot:
             for n, rec in enumerate(below, len(picked) + 1):
                 self.con.execute("UPDATE opportunities SET decision=? WHERE key=?",
                                  (rec["verdict"], rec["job"].key))
-                await self.app.bot.send_message(
+                msg = await self.app.bot.send_message(
                     chat, _card_text(n, rec, show_score=True), parse_mode=ParseMode.HTML,
                     reply_markup=_card_kb(rec["job"].key),
                     disable_web_page_preview=True)
+                self._remember_card_message(rec["job"].key, chat, msg.message_id)
 
         self.con.commit()
+
+    # ------------------------------------------------------------ card message tracking
+    def _remember_card_message(self, opp_key: str, chat_id: int, msg_id: int) -> None:
+        """So a Hide tap (or the dead-link sweep) can delete the actual card,
+        not just its buttons — the card's own title is now the job link, one
+        message per job, so there's only ever one id to remember."""
+        dbm.kv_set(self.con, f"msg_{opp_key[:40]}", [chat_id, msg_id])
+
+    async def _delete_card_message(self, opp_key: str, forget: bool = True) -> bool:
+        k = f"msg_{opp_key[:40]}"
+        ids = dbm.kv_get(self.con, k)
+        if not ids:
+            return False
+        chat_id, msg_id = ids
+        try:
+            await self.app.bot.delete_message(chat_id, msg_id)
+        except Exception:  # noqa: BLE001 — already deleted/too old, fine
+            pass
+        if forget:
+            self.con.execute("DELETE FROM kv WHERE k=?", (k,))
+        return True
+
+    # ------------------------------------------------------------ dead-link sweep
+    async def check_dead_links(self) -> int:
+        """Daily sweep: a job whose link has gone dead (404/410) while it was
+        still sitting on-screen, undecided, gets pulled with a note — Matt
+        asked not to have to discover this by clicking through stale links.
+        Conservative on purpose: only a clear 404/410 counts as dead; any
+        other outcome (timeout, bot-blocking, 5xx) is left for the next
+        sweep rather than risk deleting a job that's still actually open."""
+        rows = self.con.execute("SELECT k, v FROM kv WHERE k LIKE 'msg\\_%' ESCAPE '\\'").fetchall()
+        removed = 0
+        for r in rows:
+            opp_key = r["k"][len("msg_"):]
+            chat_id, _msg_id = json.loads(r["v"])
+            row = self.con.execute(
+                "SELECT key, title, company, url FROM opportunities WHERE key LIKE ?",
+                (opp_key + "%",)).fetchone()
+            if not row or not row["url"]:
+                continue
+            try:
+                resp = await asyncio.to_thread(
+                    requests.head, row["url"], timeout=15, allow_redirects=True)
+                if resp.status_code == 405:  # some ATS boards reject HEAD
+                    resp = await asyncio.to_thread(
+                        requests.get, row["url"], timeout=15, allow_redirects=True)
+            except Exception:  # noqa: BLE001 — network hiccup, recheck next sweep
+                continue
+            if resp.status_code not in (404, 410):
+                continue
+            await self._delete_card_message(row["key"])
+            await self.app.bot.send_message(
+                chat_id, f"⌛ Missed: <b>{html.escape(row['title'])}</b> — "
+                         f"{html.escape(row['company'])} (link's dead now — "
+                         f"gone before you got to it)",
+                parse_mode=ParseMode.HTML)
+            self.con.execute(
+                "INSERT INTO verdicts(opp_key, ts, verdict, note) VALUES(?,?,?,?)",
+                (row["key"], time.time(), "expired_unactioned", ""))
+            self._drop_followup(row["key"])
+            removed += 1
+        if removed:
+            self.con.commit()
+        return removed
+
+    # ------------------------------------------------------------ apply/outreach follow-ups
+    FOLLOWUP_ACTIONS = ("apply", "outreach", "intro")
+    FOLLOWUP_LABELS = {"apply": "apply to", "outreach": "reach out to", "intro": "ask for an intro to"}
+
+    def _track_followup(self, opp_key: str, action: str) -> None:
+        k = opp_key[:40]
+        pending = dbm.kv_get(self.con, "pending_followups") or []
+        if any(p["key"] == k for p in pending):
+            return  # already tracking this job (whichever action came first)
+        pending.append({"key": k, "action": action, "since": time.time(), "nudged_at": None})
+        dbm.kv_set(self.con, "pending_followups", pending)
+
+    def _drop_followup(self, opp_key: str) -> None:
+        k = opp_key[:40]
+        pending = dbm.kv_get(self.con, "pending_followups") or []
+        kept = [p for p in pending if p["key"] != k]
+        if len(kept) != len(pending):
+            dbm.kv_set(self.con, "pending_followups", kept)
+
+    async def check_followup_nudges(self) -> int:
+        """Matt: 'if I'm going to apply or do outreach they should stay
+        visible so I don't forget to do it' — Apply/Outreach/Intro cards are
+        never auto-hidden, but a single nudge after 24h and, if still
+        ignored, showing up in the Sunday brief (see sunday_brief's
+        `lingering`) means it isn't purely on Matt to remember to check."""
+        chat = await self.chat_id()
+        if not chat:
+            return 0
+        pending = dbm.kv_get(self.con, "pending_followups") or []
+        now = time.time()
+        nudged = 0
+        for p in pending:
+            if p.get("nudged_at") or now - p["since"] < 24 * 3600:
+                continue
+            row = self.con.execute(
+                "SELECT key, title, company FROM opportunities WHERE key LIKE ?",
+                (p["key"] + "%",)).fetchone()
+            if not row:
+                p["nudged_at"] = now  # opportunity gone (pruned/etc) — stop trying
+                nudged += 1
+                continue
+            label = self.FOLLOWUP_LABELS.get(p["action"], "follow up on")
+            await self.app.bot.send_message(
+                chat, f"Did you {label} <b>{html.escape(row['title'])}</b> — "
+                      f"{html.escape(row['company'])} yet?", parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup([[
+                    B("Done ✅", callback_data=f"f|done|{p['key']}"),
+                    B("Not yet ⏰", callback_data=f"f|not_yet|{p['key']}"),
+                    B("Drop it", callback_data=f"f|drop|{p['key']}")]]))
+            p["nudged_at"] = now
+            nudged += 1
+        if nudged:
+            dbm.kv_set(self.con, "pending_followups", pending)
+            self.con.commit()
+        return nudged
 
     # ------------------------------------------------------------ buttons
     async def on_button(self, update: Update, _):
@@ -205,6 +327,22 @@ class Bot:
             await q.edit_message_reply_markup(_hide_kb(key)); await q.answer(); return
         if kind == "h" and action == "back":
             await q.edit_message_reply_markup(_card_kb(key)); await q.answer(); return
+        if kind == "f":
+            if action == "done":
+                self._drop_followup(key)
+                self.con.execute(
+                    "INSERT INTO verdicts(opp_key, ts, verdict, note) VALUES(?,?,?,?)",
+                    (key, time.time(), "followup_done", ""))
+                self.con.commit()
+                await q.answer("Nice — logged as done.")
+                await q.edit_message_reply_markup(None)
+            elif action == "drop":
+                self._drop_followup(key)
+                await q.answer("Dropped — won't remind again.")
+                await q.edit_message_reply_markup(None)
+            else:  # not_yet
+                await q.answer("OK — I'll check back.")
+            return
         if kind == "v":
             row = self.con.execute("SELECT * FROM opportunities WHERE key LIKE ?",
                                    (key + "%",)).fetchone()
@@ -220,6 +358,8 @@ class Bot:
                 snooze = dbm.kv_get(self.con, "snoozed") or []
                 snooze.append({"key": full_key, "at": time.time() + 6 * 3600})
                 dbm.kv_set(self.con, "snoozed", snooze)
+            if action in self.FOLLOWUP_ACTIONS:
+                self._track_followup(full_key, action)
             self.con.commit()
             ack = {"apply": "Marked APPLY — angle drafting queued.",
                    "outreach": "Marked OUTREACH — draft queued.",
@@ -228,7 +368,13 @@ class Bot:
                    "hide_never_co": "Company permanently blocked."}
             await q.answer(ack.get(action, "Logged — ranking updated."))
             if action.startswith("hide"):
-                await q.edit_message_reply_markup(None)
+                # Hide + a reason means "get this off my screen" — remove the
+                # card outright, no separate X tap needed afterward. Apply/
+                # Outreach/Interested/Later are untouched — those stay
+                # visible on purpose so Matt doesn't forget to act on them.
+                self._drop_followup(full_key)
+                if not await self._delete_card_message(full_key):
+                    await q.edit_message_reply_markup(None)  # untracked older card
 
     async def on_advisory(self, update: Update, _):
         status = dbm.kv_get(self.con, "advisory_status") or {}
@@ -369,6 +515,9 @@ class Bot:
                  f"Top sources: {brief['top_sources']}"]
         if brief.get("degraded"):
             lines.append(f"⚠ degraded: {brief['degraded']}")
+        if brief.get("lingering"):
+            lines.append("Still sitting there (marked, never confirmed done):")
+            lines.extend(f"  · {x}" for x in brief["lingering"])
         for p in brief.get("proposals", []):
             lines.append(f"Proposal: {p['text']}")
         await self.app.bot.send_message(chat, "\n".join(lines), parse_mode=ParseMode.HTML)

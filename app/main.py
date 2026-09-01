@@ -295,6 +295,18 @@ class Pipeline:
                                 "GROUP BY verdict_class", (wk,)).fetchall()
         tops = self.con.execute("SELECT name, total_items FROM sources ORDER BY "
                                 "pursue_weighted DESC, total_items DESC LIMIT 4").fetchall()
+        # Apply/Outreach/Intro nudged 24h in and still not marked done after
+        # another 48h (72h total) — surfaced here rather than paging Matt
+        # again, per his ask: nudge once, then let it show up on its own.
+        lingering = []
+        for p in (dbm.kv_get(self.con, "pending_followups") or []):
+            if time.time() - p["since"] < 72 * 3600:
+                continue
+            row = self.con.execute(
+                "SELECT title, company FROM opportunities WHERE key LIKE ?",
+                (p["key"] + "%",)).fetchone()
+            if row:
+                lingering.append(f"{p['action']}: {row['title']} — {row['company']}")
         return {"delivered": delivered, "pursued": pursued,
                 "pursue_rate": pursued / delivered if delivered else 0.0,
                 "hard_neg_rate": hard_neg / delivered if delivered else 0.0,
@@ -303,6 +315,7 @@ class Pipeline:
                 "top_sources": ", ".join(r["name"] for r in tops),
                 "degraded": ", ".join(r["name"] for r in self.con.execute(
                     "SELECT name FROM sources WHERE fail_streak>=2")),
+                "lingering": lingering,
                 "proposals": dbm.kv_get(self.con, "pending_proposals") or []}
 
 
@@ -348,6 +361,17 @@ async def run():
                             requests.get(ping, timeout=10)
                         except Exception:  # noqa: BLE001
                             pass
+                if now.hour == 12 and dbm.kv_get(con, "deadlink_swept") != today:
+                    removed = await bot.check_dead_links()
+                    dbm.kv_set(con, "deadlink_swept", today); con.commit()
+                    if removed:
+                        LOG.info("dead-link sweep: removed %d expired card(s)", removed)
+                if now.hour in (10, 16) and \
+                        dbm.kv_get(con, "followups_checked") != f"{today}-{now.hour}":
+                    nudged = await bot.check_followup_nudges()
+                    dbm.kv_set(con, "followups_checked", f"{today}-{now.hour}"); con.commit()
+                    if nudged:
+                        LOG.info("followup nudge: pinged %d pending item(s)", nudged)
                 if now.weekday() == 6 and now.hour == 17 and \
                         dbm.kv_get(con, "sunday") != today:
                     await bot.send_sunday(pipe.sunday_brief())
@@ -371,48 +395,15 @@ async def run():
         if chat and dbm.kv_get(con, "code_version") != VERSION:
             try:
                 await bot.app.bot.send_message(
-                    chat, f"⬆ Updated to v{VERSION}: dashboard delivery channel added — daily "
-                          "picks POST to INGEST_URL when that env var is set (inert "
-                          "otherwise; Telegram unchanged) · includes v1.6.7 pass-line "
-                          "fix + junk bans + v1.6.6 NYC lane."
-                          "78-scored OpenAI BD now DELIVER as cleared, not close-miss "
-                          "· gig-marketplace junk banned (SaidGig, FlexBoard, GrabJobs) "
-                          "· plus v1.6.6: NYC query lane + credit-efficient TheirStack."
-                          "asks the boards for New York roles too (remote filters "
-                          "auto-drop on those queries) · TheirStack tries title-"
-                          "filtered shapes first so credits buy relevant roles · "
-                          "digital-asset pattern added."
-                          "5,200/mo plan — ~170 credits/day sliced across scans, "
-                          "rests when the day\'s slice is spent · /status shows day + "
-                          "month consumption · includes v1.6.4: one linked card per "
-                          "job, duplicates collapsed, candidate crypto feeds."
-                          "link · duplicate postings collapsed · candidate feeds added "
-                          "for cryptocurrencyjobs.co, cryptojobs.com, remote3, "
-                          "crypto.jobs (wrong guesses skip silently)."
-                          "the error and retries at exactly that number — any tier "
-                          "works · cards redesigned: role+company bold, labeled "
-                          "Location/Comp lines · repost boards replaced by the true "
-                          "employer on cards."
-                          "own documented shapes; the failure reason now pushes to you "
-                          "automatically) · 🔴/🟢 source alerts the moment coverage "
-                          "changes · every drop opens with a coverage banner when "
-                          "anything is missing · plus all of v1.6/v1.6.1: remote-or-NYC, "
-                          "word tiers, source labels, capacity pacing, /advisory."
-                          "hold across all scans (JSearch was burning 8x intended; "
-                          "plan protected) · query windows rotate so the full pool "
-                          "sweeps each day · /status shows live paid-API consumption."
-                          "replaced with plain words (/why keeps the numbers) · every "
-                          "card names its source · paid capacity raised to ~75% of plan "
-                          "· Workday prefilled + WorkingNomads + WWR category feeds · "
-                          "/advisory launches the expert-network checklist."
-                          "your links (LinkedIn included) and never invent names · "
-                          "junk purged from the universe · plain questions get direct "
-                          "answers · degraded notices include the API's own error "
-                          "text · TheirStack tries page-free payloads."
-                          "all four families score equally · employer universe (VC/PE/"
-                          "fintech/AI) wires in tonight and persists · JSearch survives "
-                          "slow queries · TheirStack self-diagnoses rejections · /debug "
-                          "now shows full API error text · repost-site links penalized.")
+                    chat, f"⬆ Updated to v{VERSION}: Hide + a reason now removes the "
+                          "card outright — no more tapping X afterward (Apply/Outreach/"
+                          "Interested/Later still stay visible on purpose) · a daily "
+                          "sweep checks every still-open card's link and auto-removes "
+                          "it with a \"missed it\" note if the posting's gone before "
+                          "you got to it · Apply/Outreach/Intro now get one check-in "
+                          "24h later (Done / Not yet / Drop it) and, if still "
+                          "unresolved after that, show up in the Sunday brief instead "
+                          "of quietly falling off your radar.")
             except Exception:  # noqa: BLE001
                 pass
             dbm.kv_set(con, "code_version", VERSION)
