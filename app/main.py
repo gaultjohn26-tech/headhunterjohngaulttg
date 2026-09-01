@@ -15,6 +15,7 @@ import yaml
 
 from . import db as dbm
 from . import funnel, ingest, planner, signals
+from . import verdict_server
 from . import VERSION
 from .bot import Bot
 
@@ -323,6 +324,8 @@ async def run():
     con.commit()
     pipe = Pipeline(con, cfg)
     bot = Bot(con, cfg, pipe)
+    if os.environ.get("VERDICT_HTTP_ENABLED", "1") != "0":
+        verdict_server.start(int(os.environ.get("VERDICT_HTTP_PORT", "8765")))
 
     async def loop():
         last_scan = 0.0
