@@ -1070,7 +1070,36 @@ def fetch_teamtailor(scfg: dict) -> list[Job]:
 # TheirStack — enterprise job-data feed (ATS-crawled + LinkedIn-derived,
 # pre-deduplicated). Activates with THEIRSTACK_API_KEY. 1 credit = 1 job
 # record returned, so the query below is tightly scoped to the last day.
+#
+# TheirStack doesn't cache results: re-asking "jobs posted in the last
+# posted_at_max_age_days" every scan re-bills every record still inside
+# that rolling window, not just genuinely new ones (confirmed against
+# their docs: theirstack.com/en/docs/api-reference/guides/
+# avoid-getting-same-jobs-twice). discovered_at_gte fixes that — pass the
+# timestamp of the last successful call and only jobs discovered since
+# are billed. Persisted to a JSON file (same pattern as RESOLVED_PATH
+# below) rather than threaded through collect_jobs()'s fn(scfg) call
+# signature, which every other fetcher also uses and shouldn't have to
+# change for one source's state. Cold start (no file yet) omits the
+# filter, matching the previous behavior exactly.
 # ---------------------------------------------------------------------------
+TS_CURSOR_PATH = ROOT.parent / "data" / "theirstack_cursor.json"  # survives rebuilds
+
+
+def _ts_read_cursor() -> str | None:
+    try:
+        return json.loads(TS_CURSOR_PATH.read_text()).get("discovered_at_gte")
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+
+
+def _ts_write_cursor(value: str) -> None:
+    try:
+        TS_CURSOR_PATH.write_text(json.dumps({"discovered_at_gte": value}) + "\n")
+    except OSError as exc:
+        LOG.warning("theirstack: couldn't persist discovered_at_gte cursor: %s", exc)
+
+
 def fetch_theirstack(scfg: dict) -> list[Job]:
     key = os.environ.get("THEIRSTACK_API_KEY", "")
     if not key:
@@ -1082,7 +1111,14 @@ def fetch_theirstack(scfg: dict) -> list[Job]:
     cfg_limit = int(scfg.get("daily_record_limit") or 100)
     cfg_age = max(1, int(scfg.get("max_age_days") or 1))
     titles = scfg.get("title_patterns") or []
+    # Captured before the request (not after) so the next cursor can never
+    # be later than the moment this call was actually made — a job
+    # discovered mid-request can't be skipped next time.
+    request_started_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    cursor = _ts_read_cursor()
     probe = {"limit": 25, "page": 0, "posted_at_max_age_days": cfg_age}
+    if cursor:
+        probe["discovered_at_gte"] = cursor
     tfilter = {"job_title_or": titles} if titles else {}
     ladder = [  # most-filtered first: credits should buy RELEVANT jobs
         ("titles_us_order", {**probe, **tfilter,
@@ -1092,7 +1128,8 @@ def fetch_theirstack(scfg: dict) -> list[Job]:
                           "order_by": [{"desc": True, "field": "date_posted"}]}),
         ("titles_only", {**probe, **tfilter}),
         ("offset_titles", {"offset": 0, "limit": 25,
-                           "posted_at_max_age_days": cfg_age, **tfilter}),
+                           "posted_at_max_age_days": cfg_age,
+                           **({"discovered_at_gte": cursor} if cursor else {}), **tfilter}),
         ("official_clone", dict(probe)),  # unfiltered last resort
     ]
     payload, last_err = None, ""
@@ -1131,6 +1168,7 @@ def fetch_theirstack(scfg: dict) -> list[Job]:
             break
     if payload is None:
         raise RuntimeError(f"theirstack rejected every documented shape; {last_err}")
+    _ts_write_cursor(request_started_at)
     rows = payload.get("data") or payload.get("jobs") or []
     out: list[Job] = []
     for j in rows:
