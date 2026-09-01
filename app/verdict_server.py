@@ -17,12 +17,25 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import db as dbm
 
 LOG = logging.getLogger("verdict_server")
+
+# db.connect()'s own PRAGMA busy_timeout=5000 lets SQLite's internal busy
+# handler retry a locked write for up to 5s before raising — found by
+# testing this live against a real scan cycle (4,689 jobs, heavy
+# upsert_opportunity write volume) that 5s isn't always enough, and an
+# uncaught OperationalError here doesn't just fail the request, it kills
+# the connection mid-response (the client sees a raw socket close, not an
+# HTTP error) since BaseHTTPRequestHandler has no exception handling of
+# its own. Retrying the whole operation at this level, not just relying
+# on the pragma, is what actually survives a real busy scan.
+_MAX_ATTEMPTS = 3
+_RETRY_DELAY_S = 1.0
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -40,6 +53,23 @@ class _Handler(BaseHTTPRequestHandler):
         if not key or not verdict:
             self._reply(400, {"error": "need key + verdict"})
             return
+        last_exc = None
+        for attempt in range(1, _MAX_ATTEMPTS + 1):
+            try:
+                self._write_verdict(key, verdict, reason)
+                LOG.info("verdict via dashboard: %s -> %s%s", key, verdict,
+                         f" ({reason})" if reason else "")
+                self._reply(200, {"ok": True})
+                return
+            except sqlite3.OperationalError as exc:
+                last_exc = exc
+                LOG.warning("verdict write attempt %d/%d hit %s, retrying",
+                            attempt, _MAX_ATTEMPTS, exc)
+                time.sleep(_RETRY_DELAY_S)
+        LOG.error("verdict write failed after %d attempts: %s", _MAX_ATTEMPTS, last_exc)
+        self._reply(503, {"error": f"db busy after {_MAX_ATTEMPTS} attempts: {last_exc}"})
+
+    def _write_verdict(self, key: str, verdict: str, reason: str | None) -> None:
         con = dbm.connect()
         try:
             row = con.execute("SELECT * FROM opportunities WHERE key=?", (key,)).fetchone()
@@ -54,8 +84,6 @@ class _Handler(BaseHTTPRequestHandler):
             con.commit()
         finally:
             con.close()
-        LOG.info("verdict via dashboard: %s -> %s%s", key, verdict, f" ({reason})" if reason else "")
-        self._reply(200, {"ok": True})
 
     def _reply(self, status: int, payload: dict) -> None:
         body = json.dumps(payload).encode()
