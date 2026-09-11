@@ -34,8 +34,10 @@ LOG = logging.getLogger("verdict_server")
 # HTTP error) since BaseHTTPRequestHandler has no exception handling of
 # its own. Retrying the whole operation at this level, not just relying
 # on the pragma, is what actually survives a real busy scan.
-_MAX_ATTEMPTS = 3
-_RETRY_DELAY_S = 1.0
+# Scans now commit between funnel stages (main.py), so the lock is held for
+# milliseconds rather than the whole LLM phase; the retries are a backstop.
+_MAX_ATTEMPTS = 8
+_RETRY_DELAY_S = 1.5
 
 
 class _Handler(BaseHTTPRequestHandler):

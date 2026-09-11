@@ -45,6 +45,24 @@ SEEN_KEEP_DAYS = 90
 # ----------------------------------------------------------------------------
 # Data model
 # ----------------------------------------------------------------------------
+# A lone UTF-16 surrogate (a broken emoji half like "\ud83c") survives
+# json.loads() but sqlite3 refuses to UTF-8-encode it, so one bad posting
+# killed every scan from 2026-09-08 to 09-11. Every Job is scrubbed at
+# construction — the single boundary all 22 fetchers share.
+_SURROGATE_RE = re.compile("[\ud800-\udfff]")
+_TEXT_FIELDS = ("source", "source_id", "url", "title", "company", "description",
+                "location", "job_type", "salary")
+SANITIZED: dict[str, int] = {}   # base source -> fields scrubbed, reset per collect_jobs()
+
+
+def clean_text(s):
+    if not isinstance(s, str) or not s:
+        return s
+    if "\x00" in s or _SURROGATE_RE.search(s):
+        return _SURROGATE_RE.sub("", s).replace("\x00", "")
+    return s
+
+
 @dataclass
 class Job:
     source: str
@@ -60,6 +78,18 @@ class Job:
     score: float = 0.0
     reason: str = ""
     kw_hits: list[str] = field(default_factory=list)
+
+    def __post_init__(self):
+        for f in _TEXT_FIELDS:
+            v = getattr(self, f)
+            if v is None:
+                setattr(self, f, "")
+                continue
+            c = clean_text(v)
+            if c is not v:
+                setattr(self, f, c)
+                base = (self.source or "?").split(":")[0].split(" ")[0]
+                SANITIZED[base] = SANITIZED.get(base, 0) + 1
 
     @property
     def key(self) -> str:
@@ -325,6 +355,7 @@ def fetch_greenhouse(scfg: dict) -> list[Job]:
             )
         except Exception as exc:  # noqa: BLE001
             LOG.warning("greenhouse:%s skipped: %s", slug, exc)
+            _note_subfail("greenhouse", slug, exc)
             continue
         for j in data.get("jobs") or []:
             out.append(
@@ -351,6 +382,7 @@ def fetch_lever(scfg: dict) -> list[Job]:
             )
         except Exception as exc:  # noqa: BLE001
             LOG.warning("lever:%s skipped: %s", slug, exc)
+            _note_subfail("lever", slug, exc)
             continue
         for j in data if isinstance(data, list) else []:
             cats = j.get("categories") or {}
@@ -595,6 +627,7 @@ def fetch_ashby(scfg: dict) -> list[Job]:
             data = http_get_json(f"https://api.ashbyhq.com/posting-api/job-board/{slug}")
         except Exception as exc:  # noqa: BLE001
             LOG.warning("ashby:%s skipped: %s", slug, exc)
+            _note_subfail("ashby", slug, exc)
             continue
         for j in data.get("jobs") or []:
             if j.get("isListed") is False:
@@ -629,6 +662,7 @@ def fetch_workable(scfg: dict) -> list[Job]:
             )
         except Exception as exc:  # noqa: BLE001
             LOG.warning("workable:%s skipped: %s", slug, exc)
+            _note_subfail("workable", slug, exc)
             continue
         for j in data.get("jobs") or []:
             loc = j.get("location") or {}
@@ -662,6 +696,7 @@ def fetch_smartrecruiters(scfg: dict) -> list[Job]:
             )
         except Exception as exc:  # noqa: BLE001
             LOG.warning("smartrecruiters:%s skipped: %s", slug, exc)
+            _note_subfail("smartrecruiters", slug, exc)
             continue
         for j in data.get("content") or []:
             loc = j.get("location") or {}
@@ -692,6 +727,7 @@ def fetch_recruitee(scfg: dict) -> list[Job]:
             data = http_get_json(f"https://{slug}.recruitee.com/api/offers/")
         except Exception as exc:  # noqa: BLE001
             LOG.warning("recruitee:%s skipped: %s", slug, exc)
+            _note_subfail("recruitee", slug, exc)
             continue
         for j in data.get("offers") or []:
             out.append(
@@ -774,6 +810,7 @@ def fetch_workday(scfg: dict) -> list[Job]:
                 resp.raise_for_status()
             except Exception as exc:  # noqa: BLE001
                 LOG.warning("workday:%s skipped: %s", tenant, exc)
+                _note_subfail("workday", tenant, exc)
                 break
             postings = resp.json().get("jobPostings") or []
             for j in postings:
@@ -800,8 +837,10 @@ def fetch_workday(scfg: dict) -> list[Job]:
 # We Work Remotely, and anything else: paste a feed URL into config).
 # ---------------------------------------------------------------------------
 def _rss_text(node, *names) -> str:
+    # "{*}tag" matches the local name in any (or no) namespace, so RSS 2.0,
+    # Atom, and feeds with prefixed extensions all read the same way.
     for n in names:
-        found = node.find(n)
+        found = node.find(f"{{*}}{n}")
         if found is not None and (found.text or "").strip():
             return found.text.strip()
     return ""
@@ -822,18 +861,21 @@ def fetch_rss(scfg: dict) -> list[Job]:
                               "(KHTML, like Gecko) Chrome/126.0 Safari/537.36",
                 "Accept": "application/rss+xml, application/xml;q=0.9, */*;q=0.8"})
             resp.raise_for_status()
-            # strip namespaces so RSS2 and Atom parse with the same tag names
-            xml_text = re.sub(r'\sxmlns(:\w+)?="[^"]+"', "", resp.text, count=10)
-            root = ET.fromstring(xml_text)
+            # Parse the bytes as-is. The old code regex-stripped the first 10
+            # xmlns declarations, which left prefixed tags (<content:encoded>,
+            # <media:...>) unbound and failed EVERY real feed with
+            # "unbound prefix" for the whole life of the system.
+            root = ET.fromstring(resp.content)
         except Exception as exc:  # noqa: BLE001
             LOG.warning("rss:%s skipped (fetch or parse): %s", name, exc)
+            _note_subfail("rss", name, exc)
             continue
-        items = root.findall(".//item") or root.findall(".//entry")
+        items = root.findall(".//{*}item") or root.findall(".//{*}entry")
         for it in items:
             title = _rss_text(it, "title")
             link = _rss_text(it, "link")
             if not link:  # Atom puts it in an attribute
-                ln = it.find("link")
+                ln = it.find("{*}link")
                 link = ln.get("href", "") if ln is not None else ""
             when = _rss_text(it, "pubDate", "published", "updated")
             posted = None
@@ -862,7 +904,7 @@ def fetch_rss(scfg: dict) -> list[Job]:
                     title=jtitle,
                     company=company,
                     description=strip_html(
-                        _rss_text(it, "description", "summary", "content")
+                        _rss_text(it, "description", "summary", "content", "encoded")
                     )[:2000],
                     location="",
                     posted_at=posted,
@@ -1002,6 +1044,7 @@ def fetch_bamboohr(scfg: dict) -> list[Job]:
             data = http_get_json(f"https://{slug}.bamboohr.com/careers/list")
         except Exception as exc:  # noqa: BLE001
             LOG.warning("bamboohr:%s skipped: %s", slug, exc)
+            _note_subfail("bamboohr", slug, exc)
             continue
         for j in data.get("result") or []:
             loc = j.get("location") or {}
@@ -1038,6 +1081,7 @@ def fetch_pinpoint(scfg: dict) -> list[Job]:
             data = http_get_json(f"https://{slug}.pinpointhq.com/postings.json")
         except Exception as exc:  # noqa: BLE001
             LOG.warning("pinpoint:%s skipped: %s", slug, exc)
+            _note_subfail("pinpoint", slug, exc)
             continue
         rows = data.get("data") if isinstance(data, dict) else data
         for j in rows or []:
@@ -1252,10 +1296,26 @@ SOURCES = {
 ALL_REMOTE_SOURCES = {"remotive", "remoteok", "jobicy", "jsearch", "web3career", "workingnomads"}  # remote by construction
 
 
+# Per-company / per-feed fault isolation is right (one dead board must not
+# kill a source), but it also meant a source could be 100% dead — every RSS
+# feed failing, every scan, for a month — while the canaries reported it
+# healthy, because the fetcher "succeeded" with 0 items. Fetchers now note
+# each sub-failure here; collect_jobs() promotes "0 items AND sub-failures"
+# to a real source failure and reports partial failures alongside.
+SUB_FAILURES: dict[str, list[str]] = {}
+
+
+def _note_subfail(source: str, label: str, exc: Exception) -> None:
+    SUB_FAILURES.setdefault(source, []).append(f"{label}: {str(exc)[:120]}")
+
+
 def collect_jobs(cfg: dict) -> tuple[list[Job], dict]:
     resolved = load_resolved()
     jobs: list[Job] = []
-    health = {"ok": [], "failed": [], "keyless": [], "disabled": [], "errors": {}}
+    health = {"ok": [], "failed": [], "keyless": [], "disabled": [], "errors": {},
+              "partial": {}, "sanitized": {}}
+    SUB_FAILURES.clear()
+    SANITIZED.clear()
     for name, fn in SOURCES.items():
         scfg = dict((cfg.get("sources") or {}).get(name) or {})
         if not scfg.get("enabled", False):
@@ -1267,16 +1327,25 @@ def collect_jobs(cfg: dict) -> tuple[list[Job], dict]:
             )
         try:
             got = fn(scfg)
+            subs = SUB_FAILURES.get(name) or []
+            if not got and subs:
+                raise RuntimeError(f"all {len(subs)} inputs failed; " + " | ".join(subs[:3]))
+            if subs:
+                health["partial"][name] = subs
             if got or name not in KEYED_SOURCES or _has_key(name):
                 health["ok"].append((name, len(got)))
             else:
                 health["keyless"].append(name)
-            LOG.info("%-12s -> %d postings", name, len(got))
+            LOG.info("%-12s -> %d postings%s", name, len(got),
+                     f" ({len(subs)} input(s) failing)" if subs else "")
             jobs.extend(got)
         except Exception as exc:  # noqa: BLE001 — one bad source must not kill the run
             health["failed"].append(name)
             health["errors"][name] = str(exc)[:200]
             LOG.warning("%-12s FAILED: %s", name, exc)
+    health["sanitized"] = dict(SANITIZED)
+    if SANITIZED:
+        LOG.warning("sanitized malformed text in %s", SANITIZED)
     return jobs, health
 
 

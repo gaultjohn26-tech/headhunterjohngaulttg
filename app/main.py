@@ -54,6 +54,10 @@ class _Opp:
         self.__dict__.update(kw)
 
 
+def should_ping(stats: dict) -> bool:
+    return int(stats.get("scans_ok") or 0) > 0
+
+
 class Pipeline:
     def __init__(self, con, cfg):
         self.con, self.cfg = con, cfg
@@ -160,11 +164,61 @@ class Pipeline:
             dbm.kv_set(self.con, k, (dbm.kv_get(self.con, k) or 0) + got)
             dk = f"ts_day_{dt.date.today().isoformat()}"
             dbm.kv_set(self.con, dk, (dbm.kv_get(self.con, dk) or 0) + got)
+        # One poisoned record must never take the other ~5,000 with it
+        # (2026-09-08..11: a single un-encodable posting aborted 16 scans in
+        # a row). Text is scrubbed at Job construction; this is the backstop.
+        upsert_errors = []
         for j in jobs:
-            dbm.upsert_opportunity(self.con, j)
+            try:
+                dbm.upsert_opportunity(self.con, j)
+            except Exception as exc:  # noqa: BLE001
+                upsert_errors.append(f"{j.key[:60]}: {type(exc).__name__}: {str(exc)[:80]}")
+        if upsert_errors:
+            LOG.error("%d posting(s) could not be stored: %s", len(upsert_errors),
+                      " | ".join(upsert_errors[:3]))
+        health["upsert_errors"] = upsert_errors
+        # Commit here and after each stage below: the funnel makes minutes of
+        # LLM calls, and holding SQLite's single write lock across them is
+        # what made the dashboard's verdict endpoint fail "database is locked".
+        self.con.commit()
+        fresh = self._fresh_jobs(jobs)
+        LOG.info("%d fetched, %d new-or-resignaled", len(jobs), len(fresh))
+        survivors = funnel.hard_constraints(self.con, fresh, cfg, now)
+        kept = funnel.triage(self.con, survivors, cfg)
+        self.con.commit()
+        screened = funnel.screen(self.con, kept, cfg)
+        self.con.commit()
+        evaluated = funnel.deep_eval(self.con, screened, cfg)
+        self.con.commit()
+        LOG.info("funnel: %d survivors -> %d triaged -> %d screened -> %d evaluated",
+                 len(survivors), len(kept), len(screened), len(evaluated))
+        # earliest-wins query credit
+        for j in kept:
+            base = j.source.split(":")[0].split(" ")[0]
+            if base in ("jsearch", "adzuna", "jooble"):
+                planner.credit_query(self.con, base, "", 0)  # coarse v1 credit
+        self._log_scan(n=len(jobs), ok=True, considered=len(kept), evaluated=len(evaluated))
+        self.con.commit()
+        return {"scanned": len(jobs), "evaluated": evaluated, "health": health}
+
+    def _fresh_jobs(self, jobs) -> list:
+        """Which of this scan's postings still need judging.
+        Skip: already delivered; deep-evaluated with no newer signal; a
+        different key for a URL that was already deep-evaluated (the same
+        posting via two publishers cost a second Sonnet call 30% of the
+        time); screened-out within the last 7 days (the old rule re-screened
+        every rejected posting on every 3-hour scan — 79% of all screening
+        was repeats — and those repeats crowded the per-scan cap)."""
         evaled = {r["opp_key"]: r["ts"] for r in self.con.execute(
             "SELECT opp_key, MAX(ts) ts FROM flight WHERE stage='deep_eval' "
             "GROUP BY opp_key")}
+        evaled_urls = {(r["url"] or "").rstrip("/").lower() for r in self.con.execute(
+            "SELECT DISTINCT o.url FROM flight f JOIN opportunities o ON o.key=f.opp_key "
+            "WHERE f.stage='deep_eval' AND o.url!=''")}
+        recent_drop = time.time() - 7 * 86400
+        dropped = {r["opp_key"] for r in self.con.execute(
+            "SELECT DISTINCT opp_key FROM flight WHERE stage='screen' AND ts>? "
+            "AND detail LIKE '%\"keep\": false%'", (recent_drop,))}
         fresh = []
         for j in jobs:
             t = evaled.get(j.key)
@@ -174,22 +228,59 @@ class Pipeline:
                 continue
             if t and (not row or (row["last_signal"] or 0) <= t):
                 continue  # already evaluated, nothing new since
+            if not t and (j.url or "").rstrip("/").lower() in evaled_urls:
+                continue  # same posting, different key — already judged
+            if j.key in dropped:
+                continue  # screened out recently; nothing new to learn
             fresh.append(j)
-        LOG.info("%d fetched, %d new-or-resignaled", len(jobs), len(fresh))
-        survivors = funnel.hard_constraints(self.con, fresh, cfg, now)
-        kept = funnel.triage(self.con, survivors, cfg)
-        screened = funnel.screen(self.con, kept, cfg)
-        evaluated = funnel.deep_eval(self.con, screened, cfg)
-        # earliest-wins query credit
-        for j in kept:
-            base = j.source.split(":")[0].split(" ")[0]
-            if base in ("jsearch", "adzuna", "jooble"):
-                planner.credit_query(self.con, base, "", 0)  # coarse v1 credit
+        return fresh
+
+    # ------------------------------------------------------------ scan ledger
+    def _log_scan(self, n: int, ok: bool, error: str = "", **extra) -> None:
         log = (dbm.kv_get(self.con, "fetch_log") or [])[-30:]
-        log.append({"ts": time.time(), "n": len(jobs)})
+        entry = {"ts": time.time(), "n": n, "ok": ok, **extra}
+        if error:
+            entry["error"] = error[:200]
+        log.append(entry)
         dbm.kv_set(self.con, "fetch_log", log)
+
+    def record_scan_failure(self, exc: Exception) -> None:
+        """A crashed scan used to vanish into the log; the 7am drop then
+        reported "0 scanned" as if the world were empty. Now it is a ledger
+        entry the drop, /status, the dashboard digest, and the dead-man ping
+        all read."""
+        try:
+            self.con.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        err = f"{type(exc).__name__}: {str(exc)[:160]}"
+        self._log_scan(n=0, ok=False, error=err)
+        dbm.kv_set(self.con, "last_scan_error", {"ts": time.time(), "error": err})
         self.con.commit()
-        return {"scanned": len(jobs), "evaluated": evaluated, "health": health}
+
+    def digest_stats(self) -> dict:
+        """Read-only 24h funnel numbers with honest labels: `fetched` is what
+        the sources returned across SUCCESSFUL scans, `considered` is what
+        reached triage, `evaluated` is what Sonnet actually scored, and
+        `scans_failed` says how much of the window is missing."""
+        cutoff = time.time() - 24 * 3600
+        log = [e for e in (dbm.kv_get(self.con, "fetch_log") or []) if e.get("ts", 0) > cutoff]
+        ok = [e for e in log if e.get("ok", True)]
+        failed = [e for e in log if not e.get("ok", True)]
+        considered = self.con.execute("SELECT COUNT(*) c FROM flight WHERE stage='triage' "
+                                      "AND ts>?", (cutoff,)).fetchone()["c"]
+        evaluated = self.con.execute("SELECT COUNT(*) c FROM flight WHERE stage='deep_eval' "
+                                     "AND ts>?", (cutoff,)).fetchone()["c"]
+        frows = self.con.execute(
+            "SELECT name, notes FROM sources WHERE fail_streak>=2").fetchall()
+        health = {"failed": [r["name"] for r in frows],
+                  "errors": {r["name"]: (r["notes"] or "") for r in frows}}
+        last_err = failed[-1].get("error", "") if failed else ""
+        return {"fetched": sum(e.get("n", 0) for e in ok),
+                "considered": considered, "scanned": considered,  # `scanned` = legacy key
+                "evaluated": evaluated,
+                "scans_ok": len(ok), "scans_failed": len(failed),
+                "last_error": last_err, "health": health}
 
     async def scan_and_maybe_flash(self, bot: Bot) -> dict:
         stats = await asyncio.to_thread(self.scan)
@@ -271,16 +362,7 @@ class Pipeline:
         funnel.BAR = 80.0 + bar_delta
         picked, below = funnel.select_daily(self.con, evaluated, time.time())
         self.con.commit()
-        scanned = self.con.execute("SELECT COUNT(*) c FROM flight WHERE stage='triage' "
-                                   "AND ts>?", (cutoff,)).fetchone()["c"]
-        frows = self.con.execute(
-            "SELECT name, notes FROM sources WHERE fail_streak>=2").fetchall()
-        health = {"failed": [r["name"] for r in frows],
-                  "errors": {r["name"]: (r["notes"] or "") for r in frows}}
-        cutoff24 = time.time() - 24 * 3600
-        fetched = sum(e["n"] for e in (dbm.kv_get(self.con, "fetch_log") or [])
-                      if e["ts"] > cutoff24)
-        return picked, below, {"scanned": scanned, "fetched": fetched, "health": health}
+        return picked, below, self.digest_stats()
 
     # ------------------------------------------------------------ sunday
     def sunday_brief(self) -> dict:
@@ -349,18 +431,28 @@ async def run():
                         and not bot.scan_lock.locked():
                     last_scan = time.time()
                     async with bot.scan_lock:
-                        await pipe.scan_and_maybe_flash(bot)
+                        try:
+                            await pipe.scan_and_maybe_flash(bot)
+                        except Exception as exc:  # noqa: BLE001
+                            pipe.record_scan_failure(exc)
+                            raise
                 today = now.date().isoformat()
                 if now.hour == 7 and dbm.kv_get(con, "dropped") != today:
                     picked, below, stats = pipe.select_daily()
                     await bot.send_daily(picked, below, stats)
                     dbm.kv_set(con, "dropped", today); con.commit()
                     ping = os.environ.get("HEALTHCHECK_PING_URL")
-                    if ping:
+                    # The dead-man switch pinged on 16 straight crashed scans
+                    # because it was tied to the drop firing, not to the
+                    # drop having anything real behind it.
+                    if ping and should_ping(stats):
                         try:
                             requests.get(ping, timeout=10)
                         except Exception:  # noqa: BLE001
                             pass
+                    elif ping:
+                        LOG.error("dead-man ping WITHHELD: no successful scan in 24h (%s)",
+                                  stats.get("last_error") or "no scans ran")
                 if now.hour == 12 and dbm.kv_get(con, "deadlink_swept") != today:
                     removed = await bot.check_dead_links()
                     dbm.kv_set(con, "deadlink_swept", today); con.commit()
@@ -395,15 +487,17 @@ async def run():
         if chat and dbm.kv_get(con, "code_version") != VERSION:
             try:
                 await bot.app.bot.send_message(
-                    chat, f"⬆ Updated to v{VERSION}: Hide + a reason now removes the "
-                          "card outright — no more tapping X afterward (Apply/Outreach/"
-                          "Interested/Later still stay visible on purpose) · a daily "
-                          "sweep checks every still-open card's link and auto-removes "
-                          "it with a \"missed it\" note if the posting's gone before "
-                          "you got to it · Apply/Outreach/Intro now get one check-in "
-                          "24h later (Done / Not yet / Drop it) and, if still "
-                          "unresolved after that, show up in the Sunday brief instead "
-                          "of quietly falling off your radar.")
+                    chat, f"⬆ Updated to v{VERSION}: fixed the crash that killed every "
+                          "scan since Sep 8 (one posting with a broken emoji aborted the "
+                          "whole run, which is why the 7am drop said \"0 scanned\") · a "
+                          "crashed scan can no longer hide — the drop, /status and the "
+                          "dashboard now say how many scans failed and why · removed a "
+                          "leftover cap that only ever let the 100 newest postings per "
+                          "scan reach the ranker (85% of fresh matches were thrown away "
+                          "unranked) · stopped re-judging the same rejected postings "
+                          "every 3 hours · RSS feeds (CryptoJobsList, WWR) parse for the "
+                          "first time · dashboard cards now carry company/location/comp/"
+                          "source and your taps there train the ranker.")
             except Exception:  # noqa: BLE001
                 pass
             dbm.kv_set(con, "code_version", VERSION)

@@ -23,22 +23,72 @@ from . import regret as regret_mod
 LOG = logging.getLogger("bot")
 
 INGEST_URL = os.environ.get("INGEST_URL", "")  # dashboard channel — inert until set
+# The dashboard's digest endpoint sits next to its item endpoint.
+INGEST_DIGEST_URL = os.environ.get("INGEST_DIGEST_URL") or (
+    INGEST_URL.replace("/api/ingest/jobs", "/api/ingest/jobs-digest") if INGEST_URL else "")
+
+
+def _scrub(text: str, n: int = 160) -> str:
+    """Error text can carry a full request URL — including API keys in its
+    query string (Adzuna's app_key was sitting in sources.notes). Never let
+    that leave this process."""
+    import re
+    return re.sub(r"\?[^\s\"']*", "", str(text or ""))[:n]
 
 
 def _post_ingest(recs: list[dict]) -> None:
     """Additive second delivery channel: POST the day's picks to a dashboard.
-    Does nothing unless INGEST_URL is explicitly configured."""
+    Does nothing unless INGEST_URL is explicitly configured. Sends the same
+    fields the Telegram card has; `key` is what lets a dashboard tap train
+    the ranker (verdict_server looks the row up by it)."""
     if not INGEST_URL or not recs:
         return
     items = [{
+        "key": r["job"].key,
         "title": f"{r['job'].title} — {r['job'].company}",
+        "company": r["job"].company,
+        "location": r["job"].location,
+        "comp": r["job"].salary,
         "url": r["job"].url,
+        "source": _src_label(r["job"].source),
+        "verdict": r["verdict"],
+        "score": round(r.get("final", r.get("score", 0)) or 0),
+        "blurb": r["blurb"],
+        "risk": r.get("risk", ""),
         "note": f"{r['verdict']} {r.get('final', r.get('score', 0)):.0f} · {r['blurb']}",
     } for r in recs]
     try:
         requests.post(INGEST_URL, json={"items": items}, timeout=10)
     except Exception as exc:  # noqa: BLE001
         LOG.warning("ingest POST failed: %s", exc)
+
+
+def digest_payload(stats: dict, cleared: int, below: int) -> dict:
+    health = stats.get("health") or {}
+    errs = health.get("errors") or {}
+    return {
+        "date": datetime.now(timezone.utc).isoformat(),
+        "scanned": stats.get("fetched", 0),
+        "new": stats.get("considered", stats.get("scanned", 0)),
+        "evaluated": stats.get("evaluated", 0),
+        "cleared_bar": cleared,
+        "below_bar": below,
+        "scans_ok": stats.get("scans_ok", 0),
+        "scans_failed": stats.get("scans_failed", 0),
+        "last_error": _scrub(stats.get("last_error", "")),
+        "degraded": list(health.get("failed") or []),
+        "coverage_gaps": [{"source": n, "detail": _scrub(errs.get(n, ""))}
+                          for n in (health.get("failed") or [])],
+    }
+
+
+def _post_digest(stats: dict, cleared: int, below: int) -> None:
+    if not INGEST_DIGEST_URL:
+        return
+    try:
+        requests.post(INGEST_DIGEST_URL, json=digest_payload(stats, cleared, below), timeout=10)
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning("digest POST failed: %s", exc)
 
 ADVISORY_NETWORKS = [
     ("GLG", "https://glginsights.com/council-members/"),
@@ -160,14 +210,22 @@ class Bot:
     # ------------------------------------------------------------ daily drop
     async def send_daily(self, picked: list[dict], below: list | None, stats: dict):
         await asyncio.to_thread(_post_ingest, picked + (below or []))
+        await asyncio.to_thread(_post_digest, stats, len(picked), len(below or []))
         chat = await self.chat_id()
         if not chat:
             return
         d = datetime.now(timezone.utc).strftime("%a %b %-d")
         await self.app.bot.send_message(
-            chat, f"⚡ <b>{d}</b> — {stats.get('fetched', 0):,} scanned · "
-                  f"{stats.get('scanned', 0):,} new · "
+            chat, f"⚡ <b>{d}</b> — {stats.get('fetched', 0):,} fetched · "
+                  f"{stats.get('considered', stats.get('scanned', 0)):,} considered · "
+                  f"{stats.get('evaluated', 0):,} evaluated · "
                   f"{len(picked)} cleared the bar", parse_mode=ParseMode.HTML)
+        n_fail = int(stats.get("scans_failed") or 0)
+        if n_fail:
+            n_all = n_fail + int(stats.get("scans_ok") or 0)
+            await self.app.bot.send_message(
+                chat, f"⚠ {n_fail} of {n_all} scans in the last 24h CRASHED — this slate "
+                      f"is partial. Last error: {_scrub(stats.get('last_error', ''), 200)}")
         health = stats.get("health") or {}
         if health.get("failed"):
             errs = health.get("errors") or {}
@@ -480,7 +538,22 @@ class Bot:
                 int(((self.cfg.get("sources") or {}).get("theirstack") or {})
                     .get("plan_credits_month") or 5200))
             + (f" · degraded: {', '.join(bad)}" if bad else "")
+            + self._last_scan_line()
             + f" · v{VERSION}")
+
+    def _last_scan_line(self) -> str:
+        log = dbm.kv_get(self.con, "fetch_log") or []
+        if not log:
+            return "\nNo scan has run yet."
+        e = log[-1]
+        when = datetime.fromtimestamp(e.get("ts", 0), tz=timezone.utc).strftime("%b %-d %H:%M UTC")
+        d = self.pipeline.digest_stats()
+        if e.get("ok", True):
+            head = f"\nLast scan {when}: OK — {e.get('n', 0):,} fetched"
+        else:
+            head = f"\nLast scan {when}: FAILED — {_scrub(e.get('error', ''), 120)}"
+        return head + (f" · {d['scans_failed']} of {d['scans_failed'] + d['scans_ok']} "
+                       f"scans failed in 24h" if d["scans_failed"] else "")
 
     async def on_scan(self, update: Update, _):
         if self.scan_lock.locked():
@@ -489,7 +562,13 @@ class Bot:
             return
         async with self.scan_lock:
             await update.message.reply_text("Manual scan started…")
-            stats = await self.pipeline.scan_and_maybe_flash(self)
+            try:
+                stats = await self.pipeline.scan_and_maybe_flash(self)
+            except Exception as exc:  # noqa: BLE001
+                self.pipeline.record_scan_failure(exc)
+                await update.message.reply_text(
+                    f"Scan CRASHED: {_scrub(f'{type(exc).__name__}: {exc}', 300)}")
+                return
         await update.message.reply_text(
             f"Scan done: {stats.get('scanned', 0)} items, "
             f"{stats.get('flashed', 0)} exceptional flash(es) sent.")

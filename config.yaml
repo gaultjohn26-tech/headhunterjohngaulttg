@@ -30,7 +30,13 @@ screen_model: claude-haiku-4-5
 deep_model: claude-sonnet-4-6
 min_score: 60
 max_jobs_per_email: 15
-rank_candidates_max: 100     # deep funnel; ~4-5 cents/day at this cap
+# Per-scan ceiling on postings that pass the cheap filters, applied by
+# recency BEFORE any relevance ranking. Was 100 from the old email-digest
+# era — measured 2026-09-11: 669 fresh survivors per scan, 569 discarded
+# unranked (anything older than ~15h never reached the ranker). The real
+# relevance limits live in funnel.py (TRIAGE_KEEP=300 embeddings, local
+# and free; DEEP_KEEP=60 Sonnet calls per scan).
+rank_candidates_max: 600
 
 # ---- Filters (cheap screen BEFORE the AI ranker) ------------
 max_age_days: 7
