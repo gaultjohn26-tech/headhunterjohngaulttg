@@ -58,7 +58,9 @@ def _post_ingest(recs: list[dict]) -> None:
         "note": f"{r['verdict']} {r.get('final', r.get('score', 0)):.0f} · {r['blurb']}",
     } for r in recs]
     try:
-        requests.post(INGEST_URL, json={"items": items}, timeout=10)
+        # raise_for_status: a 4xx/5xx is a failed delivery, not a success —
+        # the digest endpoint answered 400 for two weeks and this said "posted".
+        requests.post(INGEST_URL, json={"items": items}, timeout=10).raise_for_status()
     except Exception as exc:  # noqa: BLE001
         LOG.warning("ingest POST failed: %s", exc)
 
@@ -86,7 +88,8 @@ def _post_digest(stats: dict, cleared: int, below: int) -> None:
     if not INGEST_DIGEST_URL:
         return
     try:
-        requests.post(INGEST_DIGEST_URL, json=digest_payload(stats, cleared, below), timeout=10)
+        requests.post(INGEST_DIGEST_URL, json=digest_payload(stats, cleared, below),
+                      timeout=10).raise_for_status()
     except Exception as exc:  # noqa: BLE001
         LOG.warning("digest POST failed: %s", exc)
 

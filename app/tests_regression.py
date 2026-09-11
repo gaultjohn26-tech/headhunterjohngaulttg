@@ -249,5 +249,27 @@ class DigestTests(unittest.TestCase):
         self.assertNotIn("?", p["last_error"])
 
 
+class PostTests(unittest.TestCase):
+    def test_non_2xx_from_the_dashboard_is_a_logged_failure(self):
+        from . import bot as botmod
+
+        class R:
+            status_code = 400
+            def raise_for_status(self):
+                raise RuntimeError("400 Client Error: unknown inbox")
+        orig_post, orig_url, orig_ingest = botmod.requests.post, botmod.INGEST_DIGEST_URL, botmod.INGEST_URL
+        botmod.requests.post = lambda *a, **k: R()
+        botmod.INGEST_DIGEST_URL = "http://x/api/ingest/jobs-digest"
+        botmod.INGEST_URL = "http://x/api/ingest/jobs"
+        try:
+            with self.assertLogs("bot", level="WARNING") as cm:
+                botmod._post_digest({"fetched": 1, "health": {}}, 0, 0)
+                botmod._post_ingest([{"job": _job(1), "verdict": "WATCH", "blurb": "b", "score": 70}])
+        finally:
+            botmod.requests.post, botmod.INGEST_DIGEST_URL, botmod.INGEST_URL = orig_post, orig_url, orig_ingest
+        self.assertTrue(any("digest POST failed" in m for m in cm.output), cm.output)
+        self.assertTrue(any("ingest POST failed" in m for m in cm.output), cm.output)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
